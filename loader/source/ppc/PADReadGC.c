@@ -47,6 +47,10 @@ const s8 DEADZONE = 0x1A;
 #define C_NSWAP3	(1<<7)
 #define C_ISWAP		(1<<8)
 
+#define MAP_BUTTON(PAD,WM) ( button |= ( BTPad[chan].button & WM ) ? PAD : 0 )
+#define MAP_TRIGGER_R(WM,VAL) ( button |= ( Pad[chan].triggerRight & WM ) ? VAL : 0 )
+#define MAP_TRIGGER_L(WM,VAL) ( button |= ( Pad[chan].triggerLeft  & WM ) ? VAL : 0 )
+
 u32 _start(u32 calledByGame)
 {
 	// Registers r1,r13-r31 automatically restored if used.
@@ -623,84 +627,22 @@ u32 _start(u32 calledByGame)
 		{
 			switch ((BTPad[chan].used & (C_NSWAP1 | C_NSWAP2 | C_NSWAP3)) >> 5)
 			{
-				case 0:	// (2)
-				default:
-				{	//Howards general config 
-					//A=A B=B Z=Z +=X -=Y Dpad=Standard
-					//C not pressed L R tilt tied to L R analog triggers.
-					//C		pressed tilt control the cStick
-					if((BTPad[chan].button & NUN_BUTTON_C)	//tilt as camera control
-					 && !(BTPad[chan].used & C_ISWAP))
-					{
-						//tilt as cStick
-						/* xAccel  L=300 C=512 R=740 */
-						if(BTPad[chan].xAccel < 350)
-							Pad[chan].substickX = -0x78;
-						else if(BTPad[chan].xAccel > 674)
-							Pad[chan].substickX = 0x78;
-						else
-							Pad[chan].substickX = (BTPad[chan].xAccel - 512) * 0xF0 / (674 - 350);
-	
-						/* yAccel  up=280 C=512 down=720 */
-						if(BTPad[chan].yAccel < 344)
-							Pad[chan].substickY = -0x78;
-						else if(BTPad[chan].yAccel > 680)
-							Pad[chan].substickY = 0x78;
-						else
-							Pad[chan].substickY = (BTPad[chan].yAccel - 512) * 0xF0 / (680 - 344);
-					}
-					else	//	use tilt as AnalogL and AnalogR
-					{
-						/* xAccel  L=300 C=512 R=740 */
-						if(BTPad[chan].xAccel < 340)
-						{
-							button |= PAD_TRIGGER_L;
-							Pad[chan].triggerLeft = 0xFF;
-						}
-						else if(BTPad[chan].xAccel < 475)
-							Pad[chan].triggerLeft = (475 - BTPad[chan].xAccel) * 0xF0 / (475 - 340);
-						else
-							Pad[chan].triggerLeft = 0;
-						
-						if(BTPad[chan].xAccel > 670)
-						{
-							button |= PAD_TRIGGER_R;
-							Pad[chan].triggerRight = 0xFF;
-						}
-						else if(BTPad[chan].xAccel > 550)
-							Pad[chan].triggerRight = (BTPad[chan].xAccel - 550) * 0xF0 / (670 - 550); 
-						else
-							Pad[chan].triggerRight = 0;
-						
-						if (!(BTPad[chan].used & C_ISWAP))	//not using IR
-						{
-							Pad[chan].substickX = 0;
-							Pad[chan].substickY = 0;
-						}
-					}
+			case 0: // (2)
+			default:
+			  {
+			    // rat0n MKDD layout
 
-					if(BTPad[chan].button & WM_BUTTON_A)
-						button |= PAD_BUTTON_A;
-					if(BTPad[chan].button & WM_BUTTON_B)
-						button |= PAD_BUTTON_B;
-					if(BTPad[chan].button & NUN_BUTTON_Z)
-						button |= PAD_TRIGGER_Z;
-					if(BTPad[chan].button & WM_BUTTON_MINUS)
-						button |= PAD_BUTTON_Y;
-//					if(BTPad[chan].button & NUN_BUTTON_C)
-//						button |= PAD_BUTTON_X;
-					if(BTPad[chan].button & WM_BUTTON_PLUS)
-						button |= PAD_BUTTON_X;
+			    MAP_BUTTON( PAD_BUTTON_A,     WM_BUTTON_A     ); // gas
+			    MAP_BUTTON( PAD_BUTTON_B,     WM_BUTTON_DOWN  ); // brake
+			    MAP_BUTTON( PAD_TRIGGER_Z,    NUN_BUTTON_C    ); // switch positions
+			    MAP_BUTTON( PAD_BUTTON_Y,     NUN_BUTTON_Z    ); // throw items
+			    MAP_BUTTON( PAD_BUTTON_START, WM_BUTTON_PLUS  ); // pause
+			    MAP_TRIGGER_L( WM_BUTTON_LEFT,  0xFF ); // dash attack left
+			    MAP_TRIGGER_R( WM_BUTTON_RIGHT, 0xFF ); // dash attack right
+			    MAP_TRIGGER_R( WM_BUTTON_B,     0xFF ); // drift
 
-					if(BTPad[chan].button & WM_BUTTON_LEFT)
-						button |= PAD_BUTTON_LEFT;
-					if(BTPad[chan].button & WM_BUTTON_RIGHT)
-						button |= PAD_BUTTON_RIGHT;
-					if(BTPad[chan].button & WM_BUTTON_DOWN)
-						button |= PAD_BUTTON_DOWN;
-					if(BTPad[chan].button & WM_BUTTON_UP)
-						button |= PAD_BUTTON_UP;
-				}break;
+			  }
+			  break;
 				case 1:	// (2 & left)
 				{	//AbdallahTerro general config
 					//A=A B=B C=X Z=Y -=Z +=R Dpad=Standard
