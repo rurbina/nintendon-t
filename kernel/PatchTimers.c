@@ -85,9 +85,9 @@ static u32 CheckFor( u32 Buf, u32 Val )
 #define U32_TIMER_CLOCK_RAD_GC		0xcf2049a1
 #define U32_TIMER_CLOCK_RAD_WII		0x8a15866c
 
-//dont know exactly what this represents
-#define FLT_ONE_DIV_SOMECLOCK_GC	0x37f88d25
-#define FLT_ONE_DIV_SOMECLOCK_WII	0x37a5b36e
+//1 divided by one 1200th of a second
+#define FLT_ONE_DIV_CLOCK_1200_GC	0x37f88d25
+#define FLT_ONE_DIV_CLOCK_1200_WII	0x37a5b36e
 
 //osGetCount, Multiplier so (GC / 1.5f)
 #define DBL_1_1574		0x3ff284b5dcc63f14ull
@@ -99,47 +99,76 @@ bool PatchTimers(u32 FirstVal, u32 Buffer)
 	if( FirstVal == FLT_TIMER_CLOCK_BUS_GC )
 	{
 		write32(Buffer, FLT_TIMER_CLOCK_BUS_WII);
-		dbgprintf("Patch:[Timer Clock float Bus] applied (0x%08X)\r\n", Buffer );
+		dbgprintf("PatchTimers:[Timer Clock float Bus] applied (0x%08X)\r\n", Buffer );
 		return true;
 	}
 	if( FirstVal == FLT_TIMER_CLOCK_CPU_GC )
 	{
 		write32(Buffer, FLT_TIMER_CLOCK_CPU_WII);
-		dbgprintf("Patch:[Timer Clock float CPU] applied (0x%08X)\r\n", Buffer );
+		dbgprintf("PatchTimers:[Timer Clock float CPU] applied (0x%08X)\r\n", Buffer );
 		return true;
 	}
 	if( FirstVal == FLT_TIMER_CLOCK_SECS_GC )
 	{
 		write32(Buffer, FLT_TIMER_CLOCK_SECS_WII);
-		dbgprintf("Patch:[Timer Clock float s] applied (0x%08X)\r\n", Buffer );
+		dbgprintf("PatchTimers:[Timer Clock float s] applied (0x%08X)\r\n", Buffer );
 		return true;
 	}
 	if( FirstVal == FLT_TIMER_CLOCK_MSECS_GC )
 	{
 		write32(Buffer, FLT_TIMER_CLOCK_MSECS_WII);
-		dbgprintf("Patch:[Timer Clock float ms] applied (0x%08X)\r\n", Buffer );
+		dbgprintf("PatchTimers:[Timer Clock float ms] applied (0x%08X)\r\n", Buffer );
 		return true;
 	}
 	if( FirstVal == FLT_ONE_DIV_CLOCK_SECS_GC )
 	{
 		write32(Buffer, FLT_ONE_DIV_CLOCK_SECS_WII);
-		dbgprintf("Patch:[Timer Clock float 1/s] applied (0x%08X)\r\n", Buffer );
+		dbgprintf("PatchTimers:[Timer Clock float 1/s] applied (0x%08X)\r\n", Buffer );
 		return true;
 	}
 	if( FirstVal == FLT_ONE_DIV_CLOCK_MSECS_GC )
 	{
 		write32(Buffer, FLT_ONE_DIV_CLOCK_MSECS_WII);
-		dbgprintf("Patch:[Timer Clock float 1/ms] applied (0x%08X)\r\n", Buffer );
+		dbgprintf("PatchTimers:[Timer Clock float 1/ms] applied (0x%08X)\r\n", Buffer );
 		return true;
 	}
-	if( FirstVal == FLT_ONE_DIV_SOMECLOCK_GC )
+	if( FirstVal == FLT_ONE_DIV_CLOCK_1200_GC )
 	{
-		write32(Buffer, FLT_ONE_DIV_SOMECLOCK_WII);
-		dbgprintf("Patch:[Timer Clock float 1/unk] applied (0x%08X)\r\n", Buffer );
+		write32(Buffer, FLT_ONE_DIV_CLOCK_1200_WII);
+		dbgprintf("PatchTimers:[Timer Clock float 1/1200] applied (0x%08X)\r\n", Buffer );
+		return true;
+	}
+	/* For Nintendo Puzzle Collection */
+	if( FirstVal == 0x38C00BB8 && (u32)Buffer == 0x770528 )
+	{	//it IS a smooth 1.5 BUT the game is actually not properly timed, good job devs
+		write32(Buffer, 0x38C01194);
+		dbgprintf("PatchTimers:[Timer Clock Panel de Pon] applied (0x%08X)\r\n", Buffer );
 		return true;
 	}
 	/* Coded in values */
 	FirstVal &= 0xFC00FFFF;
+	if( FirstVal == 0x3C0009A7 )
+	{
+		u32 NextP = CheckFor(Buffer, 0x6000EC80);
+		if(NextP > 0)
+		{
+			W16(Buffer + 2, U32_TIMER_CLOCK_BUS_WII >> 16);
+			W16(NextP + 2, U32_TIMER_CLOCK_BUS_WII & 0xFFFF);
+			dbgprintf("PatchTimers:[Timer Clock ori Bus] applied (0x%08X)\r\n", Buffer );
+			return true;
+		}
+	}
+	if( FirstVal == 0x3C0009A8 )
+	{
+		u32 NextP = CheckFor(Buffer, 0x3800EC80);
+		if(NextP > 0)
+		{
+			W16(Buffer + 2, (U32_TIMER_CLOCK_BUS_WII >> 16) + 1);
+			W16(NextP + 2, U32_TIMER_CLOCK_BUS_WII & 0xFFFF);
+			dbgprintf("PatchTimers:[Timer Clock addi Bus] applied (0x%08X)\r\n", Buffer );
+			return true;
+		}
+	}
 	if( FirstVal == 0x3C001CF7 )
 	{
 		u32 NextP = CheckFor(Buffer, 0x6000C580);
@@ -147,7 +176,7 @@ bool PatchTimers(u32 FirstVal, u32 Buffer)
 		{
 			W16(Buffer + 2, U32_TIMER_CLOCK_CPU_WII >> 16);
 			W16(NextP + 2, U32_TIMER_CLOCK_CPU_WII & 0xFFFF);
-			dbgprintf("Patch:[Timer Clock ori CPU] applied (0x%08X)\r\n", Buffer );
+			dbgprintf("PatchTimers:[Timer Clock ori CPU] applied (0x%08X)\r\n", Buffer );
 			return true;
 		}
 	}
@@ -158,7 +187,7 @@ bool PatchTimers(u32 FirstVal, u32 Buffer)
 		{
 			W16(Buffer + 2, (U32_TIMER_CLOCK_CPU_WII >> 16) + 1);
 			W16(NextP + 2, U32_TIMER_CLOCK_CPU_WII & 0xFFFF);
-			dbgprintf("Patch:[Timer Clock addi CPU] applied (0x%08X)\r\n", Buffer );
+			dbgprintf("PatchTimers:[Timer Clock addi CPU] applied (0x%08X)\r\n", Buffer );
 			return true;
 		}
 	}
@@ -169,7 +198,7 @@ bool PatchTimers(u32 FirstVal, u32 Buffer)
 		{
 			W16(Buffer + 2, U32_TIMER_CLOCK_SECS_WII >> 16);
 			W16(NextP + 2, U32_TIMER_CLOCK_SECS_WII & 0xFFFF);
-			dbgprintf("Patch:[Timer Clock ori s] applied (0x%08X)\r\n", Buffer );
+			dbgprintf("PatchTimers:[Timer Clock ori s] applied (0x%08X)\r\n", Buffer );
 			return true;
 		}
 	}
@@ -180,7 +209,7 @@ bool PatchTimers(u32 FirstVal, u32 Buffer)
 		{
 			W16(Buffer + 2, (U32_TIMER_CLOCK_SECS_WII >> 16) + 1);
 			W16(NextP + 2, U32_TIMER_CLOCK_SECS_WII & 0xFFFF);
-			dbgprintf("Patch:[Timer Clock addi s] applied (0x%08X)\r\n", Buffer );
+			dbgprintf("PatchTimers:[Timer Clock addi s] applied (0x%08X)\r\n", Buffer );
 			return true;
 		}
 	}
@@ -191,7 +220,7 @@ bool PatchTimers(u32 FirstVal, u32 Buffer)
 		{
 			W16(Buffer + 2, U32_TIMER_CLOCK_MSECS_WII >> 16);
 			W16(NextP + 2, U32_TIMER_CLOCK_MSECS_WII & 0xFFFF);
-			dbgprintf("Patch:[Timer Clock ori ms] applied (0x%08X)\r\n", Buffer );
+			dbgprintf("PatchTimers:[Timer Clock ori ms] applied (0x%08X)\r\n", Buffer );
 			return true;
 		}
 	}
@@ -202,7 +231,7 @@ bool PatchTimers(u32 FirstVal, u32 Buffer)
 		{
 			W16(Buffer + 2, (U32_TIMER_CLOCK_MSECS_WII >> 16) + 1);
 			W16(NextP + 2, U32_TIMER_CLOCK_MSECS_WII & 0xFFFF);
-			dbgprintf("Patch:[Timer Clock addi ms] applied (0x%08X)\r\n", Buffer );
+			dbgprintf("PatchTimers:[Timer Clock addi ms] applied (0x%08X)\r\n", Buffer );
 			return true;
 		}
 	}
@@ -215,7 +244,7 @@ bool PatchTimers(u32 FirstVal, u32 Buffer)
 			u32 smallTimer = U32_TIMER_CLOCK_RAD_WII >> 15;
 			W16(Buffer + 2, smallTimer >> 16);
 			W16(NextP + 2, smallTimer & 0xFFFF);
-			dbgprintf("Patch:[RADTimerRead ori shift] applied (0x%08X)\r\n", Buffer );
+			dbgprintf("PatchTimers:[RADTimerRead ori shift] applied (0x%08X)\r\n", Buffer );
 			return true;
 		}
 	}
@@ -226,7 +255,7 @@ bool PatchTimers(u32 FirstVal, u32 Buffer)
 		{
 			W16(Buffer + 2, U32_TIMER_CLOCK_RAD_WII >> 16);
 			W16(NextP + 2, U32_TIMER_CLOCK_RAD_WII & 0xFFFF);
-			dbgprintf("Patch:[RADTimerRead ori full] applied (0x%08X)\r\n", Buffer );
+			dbgprintf("PatchTimers:[RADTimerRead ori full] applied (0x%08X)\r\n", Buffer );
 			return true;
 		}
 	}
@@ -237,7 +266,7 @@ bool PatchTimers(u32 FirstVal, u32 Buffer)
 		{
 			W16(Buffer + 2, (U32_TIMER_CLOCK_RAD_WII >> 16) + 1);
 			W16(NextP + 2, U32_TIMER_CLOCK_RAD_WII & 0xFFFF);
-			dbgprintf("Patch:[RADTimerRead addi full] applied (0x%08X)\r\n", Buffer );
+			dbgprintf("PatchTimers:[RADTimerRead addi full] applied (0x%08X)\r\n", Buffer );
 			return true;
 		}
 	}
@@ -253,27 +282,41 @@ void PatchStaticTimers()
 	if(write64A(0x001463E0, DBL_0_7716, DBL_1_1574))
 	{
 		#ifdef DEBUG_PATCH
-		dbgprintf("Patch:[Majoras Mask NTSC-J] applied\r\n");
+		dbgprintf("PatchTimers:[Majoras Mask NTSC-J] applied\r\n");
 		#endif
 	}
 	else if(write64A(0x00141C00, DBL_0_7716, DBL_1_1574))
 	{
 		#ifdef DEBUG_PATCH
-		dbgprintf("Patch:[Majoras Mask NTSC-U] applied\r\n");
+		dbgprintf("PatchTimers:[Majoras Mask NTSC-U] applied\r\n");
 		#endif
 	}
 	else if(write64A(0x00130860, DBL_0_7716, DBL_1_1574))
 	{
 		#ifdef DEBUG_PATCH
-		dbgprintf("Patch:[Majoras Mask PAL] applied\r\n");
+		dbgprintf("PatchTimers:[Majoras Mask PAL] applied\r\n");
 		#endif
 	}
 	else if(read32(0x1E71AC) == 0x3CE0000A && read32(0x1E71B8) == 0x39074CB8)
-	{
+	{	/* one 60th of a second */
 		write32(0x1E71AC, 0x3CE0000F);
 		write32(0x1E71B8, 0x39077314);
 		#ifdef DEBUG_PATCH
-		dbgprintf("Patch:[Killer7 PAL] applied\r\n");
+		dbgprintf("PatchTimers:[Killer7 PAL] applied\r\n");
+		#endif
+	}
+	else if(read32(0x55A0) == 0x3C60000A && read32(0x55A4) == 0x38036000 
+		&& read32(0x55B0) == 0x380000FF)
+	{	/* The game uses 2 different timers */
+		write32(0x55A0, 0x3C60000F); //lis r3, 0xF
+		write32(0x55A4, 0x60609060); //ori r0, r3, 0x9060
+		write32(0x55B0, 0x38000180); //li r0, 0x180
+		/* Values get set twice */
+		write32(0x5ECC, 0x3C60000F); //lis r3, 0xF
+		write32(0x5ED4, 0x60609060); //ori r0, r3, 0x9060
+		write32(0x5ED8, 0x38600180); //li r3, 0x180
+		#ifdef DEBUG_PATCH
+		dbgprintf("PatchTimers:[GT Cube NTSC-J] applied\r\n");
 		#endif
 	}
 }

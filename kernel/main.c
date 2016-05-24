@@ -23,6 +23,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "common.h"
 #include "alloc.h"
 #include "DI.h"
+#include "RealDI.h"
 #include "ES.h"
 #include "SI.h"
 #include "BT.h"
@@ -38,8 +39,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "SDI.h"
 
 //#undef DEBUG
-
-u32 RealDiscCMD = 0;
+bool access_led = false;
 u32 USBReadTimer = 0;
 extern u32 s_size;
 extern u32 s_cnt;
@@ -50,6 +50,7 @@ static const WCHAR fatDevName[2] = { 0x002F, 0x0000 };
 
 extern u32 SI_IRQ;
 extern bool DI_IRQ, EXI_IRQ;
+extern u32 WaitForRealDisc;
 extern struct ipcmessage DI_CallbackMsg;
 extern u32 DI_MessageQueue;
 extern vu32 DisableSIPatch;
@@ -132,26 +133,7 @@ int _main( int argc, char *argv[] )
 
 	//Verification if we can read from disc
 	if(memcmp(ConfigGetGamePath(), "di", 3) == 0)
-	{
-		ClearRealDiscBuffer();
-		u32 Length = 0x20;
-		RealDiscCMD = DIP_CMD_NORMAL;
-		u8 *TmpBuf = ReadRealDisc(&Length, 0, false);
-		if(IsGCGame((u32)TmpBuf) == false)
-		{
-			Length = 0x800;
-			RealDiscCMD = DIP_CMD_DVDR;
-			TmpBuf = ReadRealDisc(&Length, 0, false);
-			if(IsGCGame((u32)TmpBuf) == false)
-			{
-				dbgprintf("No GC Disc!\r\n");
-				BootStatusError(-2, -2);
-				mdelay(4000);
-				Shutdown();
-			}
-		}
-		dbgprintf("DI:Reading real disc with command 0x%02X\r\n", RealDiscCMD);
-	}
+		RealDI_Init(); //will shutdown on fail
 
 	BootStatus(3, 0, 0);
 	fatfs = (FATFS*)malloca( sizeof(FATFS), 32 );
@@ -228,15 +210,6 @@ int _main( int argc, char *argv[] )
 
 	EXIInit();
 
-	ret = Check_Cheats();
-	if(ret < 0 )
-	{
-		dbgprintf("Check_Cheats failed\r\n" );
-		BootStatusError(-10, ret);
-		mdelay(4000);
-		Shutdown();
-	}
-	
 	BootStatus(11, s_size, s_cnt);
 
 	SIInit();
@@ -258,15 +231,23 @@ int _main( int argc, char *argv[] )
 	u32 DiscChangeTimer = Now;
 	u32 ResetTimer = Now;
 	u32 InterruptTimer = Now;
+#ifdef PERFMON
+	u32 loopCnt = 0;
+	u32 loopPrintTimer = Now;
+#endif
 	USBReadTimer = Now;
 	u32 Reset = 0;
 	bool SaveCard = false;
-	if( ConfigGetConfig(NIN_CFG_LED) )
+
+	//enable ios led use
+	access_led = ConfigGetConfig(NIN_CFG_LED);
+	if(access_led)
 	{
 		set32(HW_GPIO_ENABLE, GPIO_SLOT_LED);
 		clear32(HW_GPIO_DIR, GPIO_SLOT_LED);
 		clear32(HW_GPIO_OWNER, GPIO_SLOT_LED);
 	}
+
 	set32(HW_GPIO_ENABLE, GPIO_SENSOR_BAR);
 	clear32(HW_GPIO_DIR, GPIO_SENSOR_BAR);
 	clear32(HW_GPIO_OWNER, GPIO_SENSOR_BAR);
@@ -294,7 +275,15 @@ int _main( int argc, char *argv[] )
 	while (1)
 	{
 		_ahbMemFlush(0);
-
+#ifdef PERFMON
+		loopCnt++;
+		if(TimerDiffTicks(loopPrintTimer) > 1898437)
+		{
+			dbgprintf("%08i\r\n",loopCnt);
+			loopPrintTimer = read32(HW_TIMER);
+			loopCnt = 0;
+		}
+#endif
 		//Does interrupts again if needed
 		if(TimerDiffTicks(InterruptTimer) > 15820) //about 120 times a second
 		{
@@ -343,16 +332,35 @@ int _main( int argc, char *argv[] )
 			DIFinishAsync();
 			USBReadTimer = read32(HW_TIMER);
 		}
-		udelay(10); //wait for other threads
+		udelay(20); //wait for other threads
 
-		//Baten Kaitos save hax
-		/*if( read32(0) == 0x474B4245 )
+		if( WaitForRealDisc == 1 )
 		{
-			if( read32( 0x0073E640 ) == 0xFFFFFFFF )
+			if(RealDI_NewDisc())
 			{
-				write32( 0x0073E640, 0 );
+				DiscChangeTimer = read32(HW_TIMER);
+				WaitForRealDisc = 2; //do another flush round, safety!
 			}
-		}*/
+		}
+		else if( WaitForRealDisc == 2 )
+		{
+			if(TimerDiffSeconds(DiscChangeTimer))
+			{
+				//identify disc after flushing everything
+				RealDI_Identify(false);
+				//clear our fake regs again
+				sync_before_read((void*)DI_BASE, 0x40);
+				write32(DI_IMM, 0);
+				write32(DI_COVER, 0);
+				sync_after_write((void*)DI_BASE, 0x40);
+				//mask and clear interrupts
+				write32( DIP_STATUS, 0x54 );
+				//disable cover irq which DIP enabled
+				write32( DIP_COVER, 4 );
+				DIInterrupt();
+				WaitForRealDisc = 0;
+			}
+		}
 
 		if ( DiscChangeIRQ == 1 )
 		{
@@ -387,6 +395,7 @@ int _main( int argc, char *argv[] )
 		vu32 reset_status = read32(RESET_STATUS);
 		if (reset_status == 0x1DEA)
 		{
+			dbgprintf("Game Exit\r\n");
 			write32(RESET_STATUS, 0);
 			sync_after_write((void*)RESET_STATUS, 0x20);
 			DIFinishAsync();
@@ -396,7 +405,7 @@ int _main( int argc, char *argv[] )
 		{
 			if (Reset == 0)
 			{
-				dbgprintf("Fake Reset IRQ\n");
+				dbgprintf("Fake Reset IRQ\r\n");
 				write32( RSW_INT, 0x2 ); // Reset irq
 				sync_after_write( (void*)RSW_INT, 0x20 );
 				write32(HW_IPC_ARMCTRL, (1 << 0) | (1 << 4)); //throw irq
@@ -474,9 +483,6 @@ int _main( int argc, char *argv[] )
 		wait_for_ppc(1);
 	}
 
-	if( ConfigGetConfig(NIN_CFG_LED) )
-		clear32(HW_GPIO_OUT, GPIO_SLOT_LED);
-
 	if( ConfigGetConfig(NIN_CFG_MEMCARDEMU) )
 		EXIShutdown();
 
@@ -496,6 +502,9 @@ int _main( int argc, char *argv[] )
 		USBStorage_Shutdown();
 	else
 		SDHCShutdown();
+
+//make sure drive led is off before quitting
+	if( access_led ) clear32(HW_GPIO_OUT, GPIO_SLOT_LED);
 
 //make sure we set that back to the original
 	write32(HW_PPCSPEED, ori_ppcspeed);

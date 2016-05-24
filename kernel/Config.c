@@ -43,10 +43,10 @@ void ConfigInit( void )
 		ncfg->MaxPads = 0;
 	}
 
-	if( (read32(0) >> 8) == 0x47504F )	// PSO 1&2 disable cheats/debugging
-	{
-		ncfg->Config &= ~(NIN_CFG_CHEATS|NIN_CFG_DEBUGGER|NIN_CFG_DEBUGWAIT);
-	}
+	//if( (read32(0) >> 8) == 0x47504F )	// PSO 1&2 disable cheats/debugging
+	//{
+	//	ncfg->Config &= ~(NIN_CFG_CHEATS|NIN_CFG_DEBUGGER|NIN_CFG_DEBUGWAIT);
+	//}
 }
 inline char *ConfigGetGamePath( void )
 {
@@ -75,6 +75,14 @@ inline u32 ConfigGetMaxPads(void)
 inline u32 ConfigGetGameID(void)
 {
 	return ncfg->GameID;
+}
+inline s8 ConfigGetVideoScale(void)
+{
+	return ncfg->VideoScale;
+}
+inline s8 ConfigGetVideoOffset(void)
+{
+	return ncfg->VideoOffset;
 }
 inline u32 ConfigGetMemcardCode(void)
 {

@@ -99,9 +99,137 @@ enum FSIB
 	FSIB_bootSig_AA = 0x1FF
 };
 
+// GPT header information block offsets
+enum GPT_Header_Fields
+{
+	GPT_SIG1 			= 0x00,
+	GPT_Revision			= 0x08,
+	GPT_Header_Size			= 0x0C,
+	GPT_Header_CRC32		= 0x10,
+	GPT_Header_Current_LBA		= 0x18,
+	GPT_Header_Backup_LBA		= 0x20,
+	GPT_Header_First_Usable_LBA	= 0x28,
+	GPT_Header_Last_Usable_LBA	= 0x30,
+	GPT_Disk_GUID			= 0x38,
+	GPT_Partition_Array_Start_LBA	= 0x48,
+	GPT_Partition_Count		= 0x50,
+	GPT_Partition_Entry_Size	= 0x54,
+	GPT_Partition_Array_CRC32	= 0x58
+};
+
+// GPT partition entry offsets
+enum GPT_Partition_Entry_Fields
+{
+	GPT_Partition_Type_GUID		= 0x00,
+	GPT_Partition_Unique_GUID	= 0x10,
+	GPT_Partition_First_LBA		= 0x20,
+	GPT_Partition_Last_LBA		= 0x28,	/* inclusive, usually odd */
+	GPT_Partition_Attribute_Flags	= 0x30,
+	GPT_Partition_Name		= 0x38,
+};
+
 static const char FAT_SIG[3] = {'F', 'A', 'T'};
 static const char FS_INFO_SIG1[4] = {'R', 'R', 'a', 'A'};
 static const char FS_INFO_SIG2[4] = {'r', 'r', 'A', 'a'};
+static const char GPT_SIG[8] = {'E', 'F', 'I', ' ', 'P', 'A', 'R', 'T'};
+static const uint32_t GPT_Invalid_GUID[4] = {0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF};
+// EFI System Partition: {C12A7328-F81F-11D2-BA4B-00A0C93EC93B}
+static const uint32_t GPT_EFISYS_GUID[4] = {0x28732AC1, 0x1FF8D211, 0xBA4B00A0, 0xC93EC93B};
+
+#define GPT_PARTITION_ENTRY_SIZE 128
+#define GPT_PARTITION_COUNT_MAX 128
+
+/**
+ * Find the first valid partition on a GPT device.
+ * @param disc Disk device.
+ * @param gpt_lba LBA of GPT partition header sector.
+ * @param sectorBuffer Sector buffer.
+ * @return LBA of first valid partition, or 0 if none found.
+ */
+static sec_t FindFirstValidPartition_GPT_buf(const DISC_INTERFACE *disc, sec_t gpt_lba, uint8_t *sectorBuffer)
+{
+	sec_t partition_lba[128];
+	unsigned int partition_count;
+	int n, idx, gpt_lba_max;
+
+	if (!_FAT_disc_readSectors (disc, gpt_lba, 1, sectorBuffer)) return 0;
+
+	// Verify that this is in fact a GPT.
+	// NOTE: Not checking GPT version or CRC32.
+	if (memcmp(sectorBuffer, GPT_SIG, sizeof(GPT_SIG)) != 0) return 0;
+
+	// Assuming each partition entry is 128 bytes.
+	if (u8array_to_u32(sectorBuffer, GPT_Partition_Entry_Size) != GPT_PARTITION_ENTRY_SIZE)
+		return 0;
+
+	// Get the partition array information.
+	// NOTE: Starting LBA is 64-bit, but it's almost always 2.
+	gpt_lba = u8array_to_u32(sectorBuffer, GPT_Partition_Array_Start_LBA);
+	partition_count = u8array_to_u32(sectorBuffer, GPT_Partition_Count);
+	if (partition_count > GPT_PARTITION_COUNT_MAX) {
+		// We're only supporting the first 128 partitions.
+		// (Why do you have more than 128 partitions on a Wii HDD?)
+		partition_count = GPT_PARTITION_COUNT_MAX;
+	}
+
+	// Read from gpt_lba to gpt_lba + ((partition_count - 1) / 4).
+	// This assumes 512-byte sectors, 128 bytes per partition entry.
+	// 4096-byte sectors has fewer LBAs.
+	gpt_lba_max = ((partition_count - 1) / 4);
+	gpt_lba_max += gpt_lba;
+	idx = 0;	// index in partition_lba[]
+
+	for (; gpt_lba < gpt_lba_max && idx < partition_count; gpt_lba++) {
+		// Read the current sector.
+		memset(sectorBuffer, 0xFF, MAX_SECTOR_SIZE);
+		if (!_FAT_disc_readSectors (disc, gpt_lba, 1, sectorBuffer)) return 0;
+
+		// Process partition entries.
+		for (n = 0; n < MAX_SECTOR_SIZE && idx < partition_count;
+		     n += GPT_PARTITION_ENTRY_SIZE)
+		{
+			uint64_t lba64_start, lba64_end;
+
+			// Check if the partition GUIDs are valid.
+			if (!memcmp(&sectorBuffer[n + GPT_Partition_Type_GUID], GPT_Invalid_GUID, sizeof(GPT_Invalid_GUID)) ||
+			    !memcmp(&sectorBuffer[n + GPT_Partition_Unique_GUID], GPT_Invalid_GUID, sizeof(GPT_Invalid_GUID)))
+			{
+				// Invalid GUID. We're done processing this sector.
+				break;
+			}
+			else if (!memcmp(&sectorBuffer[n + GPT_Partition_Type_GUID], GPT_EFISYS_GUID, sizeof(GPT_EFISYS_GUID)))
+			{
+				// EFI System Partition. Ignore it.
+				continue;
+			}
+
+			// Save the partition LBA for later.
+			lba64_start = u8array_to_u64(sectorBuffer, n+GPT_Partition_First_LBA);
+			lba64_end = u8array_to_u64(sectorBuffer, n+GPT_Partition_Last_LBA);
+			if (lba64_start > 0xFFFFFFFFULL || lba64_end > 0xFFFFFFFFULL) {
+				// Partition is over the 32-bit sector limit.
+				// libcustomfat doesn't support this.
+				continue;
+			}
+
+			partition_lba[idx++] = (sec_t)lba64_start;
+		}
+	}
+
+	// Check the partitions to see which one is FAT.
+	for (n = 0; n < idx; n++) {
+		if(!_FAT_disc_readSectors (disc, partition_lba[n], 1, sectorBuffer)) return 0;
+
+		if (!memcmp(sectorBuffer + BPB_FAT16_fileSysType, FAT_SIG, sizeof(FAT_SIG)) ||
+			!memcmp(sectorBuffer + BPB_FAT32_fileSysType, FAT_SIG, sizeof(FAT_SIG))) {
+			// Found the FAT partition.
+			return partition_lba[n];
+		}
+	}
+
+	// No FAT partitions found.
+	return 0;
+}
 
 sec_t FindFirstValidPartition_buf(const DISC_INTERFACE* disc, uint8_t *sectorBuffer)
 {
@@ -116,6 +244,12 @@ sec_t FindFirstValidPartition_buf(const DISC_INTERFACE* disc, uint8_t *sectorBuf
 
 	memcpy(part_table,sectorBuffer+0x1BE,16*4);
 	ptr = part_table;
+
+	if (ptr[4] == 0xEE) {
+		// Device is partitioned using GPT.
+		sec_t gpt_lba = u8array_to_u32(ptr, 0x8);
+		return FindFirstValidPartition_GPT_buf(disc, gpt_lba, sectorBuffer);
+	}
 
 	for(i=0;i<4;i++,ptr+=16) {
 		sec_t part_lba = u8array_to_u32(ptr, 0x8);

@@ -90,7 +90,7 @@ void EXIInit( void )
 
 		dbgprintf("Trying to open %s\r\n", MemCardName);
 		ret = f_open_char( &MemCard, MemCardName, FA_READ );
-		if( ret != FR_OK || MemCard.fsize == 0 )
+		if( ret != FR_OK || MemCard.obj.objsize == 0 )
 		{
 #ifdef DEBUG_EXI
 			dbgprintf("EXI: Failed to open %s:%u\r\n", MemCardName, ret );
@@ -104,11 +104,11 @@ void EXIInit( void )
 
 		u32 FindBlocks = 0;
 		for (FindBlocks = 0; FindBlocks <= MEM_CARD_MAX; FindBlocks++)
-			if (MEM_CARD_SIZE(FindBlocks) == MemCard.fsize)
+			if (MEM_CARD_SIZE(FindBlocks) == MemCard.obj.objsize)
 				break;
 		if (FindBlocks > MEM_CARD_MAX)
 		{
-			dbgprintf("EXI: Memcard unexpected size %s:%u\r\n", MemCardName, MemCard.fsize );
+			dbgprintf("EXI: Memcard unexpected size %s:%u\r\n", MemCardName, MemCard.obj.objsize );
 			Shutdown();
 		}
 		ConfigSetMemcardBlocks(FindBlocks);
@@ -581,9 +581,9 @@ u32 EXIDevice_ROM_RTC_SRAM_UART( u8 *Data, u32 Length, u32 Mode )
 		{
 			case IPL_READ_FONT:
 			{
-#ifdef DEBUG_SRAM
-				dbgprintf("EXI: IPLRead( %p, %08X, %u)\r\n", Data, IPLReadOffset, Length );
-#endif
+//#ifdef DEBUG_SRAM
+				dbgprintf("EXI: IPLRead( %p, %08X, %u), No ReadROM Patch?\r\n", Data, IPLReadOffset, Length );
+//#endif
 				EXIReadFontFile(Data, Length);
 			} break;
 			case RTC_READ:

@@ -3,7 +3,7 @@
 Nintendont (Kernel) - Playing Gamecubes in Wii mode on a Wii U
 
 Copyright (C) 2013  crediar
-Copyright (C) 2014  FIX94
+Copyright (C) 2014 - 2016 FIX94
 
 This program is free software; you can redistribute it and/or
 modify it under the terms of the GNU General Public License
@@ -27,6 +27,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "PatchCodes.h"
 #include "PatchWidescreen.h"
 #include "PatchTimers.h"
+#include "TRI.h"
 #include "Config.h"
 #include "global.h"
 #include "patches.c"
@@ -34,11 +35,12 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "ISO.h"
 #include "SI.h"
 #include "EXI.h"
-#include "GCAM.h"
+#include "codehandler.h"
 //#define DEBUG_DSP  // Very slow!! Replace with raw dumps?
 
-#define GAME_ID		(read32(0))
-#define TITLE_ID	(GAME_ID >> 8)
+u32 GAME_ID	= 0;
+u16 GAME_ID6 = 0;
+u32 TITLE_ID = 0;
 
 #define PATCH_OFFSET_START (0x3000 - (sizeof(u32) * 3))
 #define PATCH_OFFSET_ENTRY PATCH_OFFSET_START - FakeEntryLoad_size
@@ -46,8 +48,8 @@ u32 POffset = PATCH_OFFSET_ENTRY;
 vu32 Region = 0;
 vu32 useipl = 0, useipltri = 0;
 vu32 DisableSIPatch = 0, DisableEXIPatch = 0;
-vu32 TRIGame = TRI_NONE;
-extern u32 SystemRegion;
+extern vu32 TRIGame;
+
 #define PRS_DOL     0x131C0000
 #define PRS_EXTRACT 0x131C0020
 
@@ -79,13 +81,25 @@ u32 DOLMaxOff  = 0;
 vu32 TRI_BackupAvailable = 0;
 vu32 GameEntry = 0, FirstLine = 0;
 u32 AppLoaderSize = 0;
+u32 MAT2patched = 0;
 
+static char cheatPath[255];
 extern u32 prs_decompress(void* source,void* dest);
 extern u32 prs_decompress_size(void* source);
 
-extern int dbgprintf( const char *fmt, ...);
+static FuncPattern curFunc;
 
-const unsigned char DSPHashes[][0x14] =
+#ifndef DEBUG_PATCH
+#define dbgprintf(...)
+#else
+extern int dbgprintf( const char *fmt, ...);
+#endif
+
+extern u32 UseReadLimit;
+extern u32 RealDiscCMD;
+u32 IsN64Emu = 0;
+
+static const unsigned char DSPHashes[][0x14] =
 {
 	{
 		0xC9, 0x7D, 0x1E, 0xD0, 0x71, 0x90, 0x47, 0x3F, 0x6A, 0x66, 0x42, 0xB2, 0x7E, 0x4A, 0xDB, 0xCD, 0xB6, 0xF8, 0x8E, 0xC3,			//	0 Dolphin=0x86840740=Zelda WW
@@ -135,15 +149,18 @@ const unsigned char DSPHashes[][0x14] =
 	{
 		0x9F, 0x3C, 0x9F, 0x9E, 0x05, 0xC7, 0xD5, 0x0B, 0x38, 0x49, 0x2F, 0x2C, 0x68, 0x75, 0x30, 0xFD, 0xE8, 0x6F, 0x9B, 0xCA,			//	15 Dolphin=0x3389a79e=Metroid Prime Trilogy Wii (Needed?)
 	},
+	{
+		0x13, 0x07, 0xEF, 0xAF, 0x7E, 0x66, 0x96, 0x60, 0xCE, 0x00, 0x2B, 0x89, 0x6E, 0x7E, 0xD4, 0xE7, 0xD8, 0x0F, 0x11, 0xF7,			//	16 Dolphin=0xdf059f68=Pikmin US Demo (Unknown to Dolphin)
+	},
 };
 
-const unsigned char DSPPattern[][0x10] =
+static const unsigned char DSPPattern[][0x10] =
 {
 	{
 		0x02, 0x9F, 0x00, 0x12, 0x00, 0x00, 0x00, 0x00, 0x02, 0xFF, 0x00, 0x00, 0x02, 0xFF, 0x00, 0x00,		//	0 Hash 12, 1, 0, 5, 8
 	},
 	{
-		0x02, 0x9F, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x02, 0xFF, 0x00, 0x00, 0x02, 0xFF, 0x00, 0x00,		//	1 Hash 14, 13, 11, 10
+		0x02, 0x9F, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x02, 0xFF, 0x00, 0x00, 0x02, 0xFF, 0x00, 0x00,		//	1 Hash 14, 13, 11, 10, 16
 	},
 	{
 		0x00, 0x00, 0x00, 0x00, 0x02, 0x9F, 0x0C, 0x10, 0x02, 0x9F, 0x0C, 0x1F, 0x02, 0x9F, 0x0C, 0x3B,		//	2 Hash 2
@@ -172,7 +189,7 @@ typedef struct DspMatch
 	u32 SHA1;
 } DspMatch;
 
-const DspMatch DspMatches[] =
+static const DspMatch DspMatches[] =
 {
 	// Order Patterns together by increasing Length
 	// Length, Pattern,   SHA1
@@ -185,6 +202,7 @@ const DspMatch DspMatches[] =
 	{ 0x00001760,    1,     13 },
 	{ 0x000017E0,    1,     11 },
 	{ 0x00001A00,    1,     10 },
+	{ 0x00001B80,    1,     16 },
 	{ 0x000019E0,    2,      2 },
 	{ 0x00001EC0,    3,      3 },
 	{ 0x00001F20,    4,      4 },
@@ -194,7 +212,7 @@ const DspMatch DspMatches[] =
 };
 
 #define AX_DSP_NO_DUP3 (0xFFFF)
-void PatchAX_Dsp(u32 ptr, u32 Dup1, u32 Dup2, u32 Dup3, u32 Dup2Offset)
+static void PatchAX_Dsp(u32 ptr, u32 Dup1, u32 Dup2, u32 Dup3, u32 Dup2Offset)
 {
 	static const u32 MoveLength = 0x22;
 	static const u32 CopyLength = 0x12;
@@ -272,7 +290,7 @@ void PatchAX_Dsp(u32 ptr, u32 Dup1, u32 Dup2, u32 Dup3, u32 Dup2Offset)
 	return;
 }
 
-void PatchZelda_Dsp(u32 DspAddress, u32 PatchAddr, u32 OrigAddress, bool Split, bool KeepOrig)
+static void PatchZelda_Dsp(u32 DspAddress, u32 PatchAddr, u32 OrigAddress, bool Split, bool KeepOrig)
 {
 	u32 Tmp = R32(DspAddress + (OrigAddress + 0) * 2); // original instructions at OrigAddress
 	if (Split)
@@ -295,14 +313,14 @@ void PatchZelda_Dsp(u32 DspAddress, u32 PatchAddr, u32 OrigAddress, bool Split, 
 	W32(DspAddress + (PatchAddr + 4) * 2, Tmp);
 	W32(DspAddress + (OrigAddress + 0) * 2, 0x02BF0000 | PatchAddr);  // call PatchAddr
 }
-void PatchZeldaInPlace_Dsp(u32 DspAddress, u32 OrigAddress)
+static void PatchZeldaInPlace_Dsp(u32 DspAddress, u32 OrigAddress)
 {
 	W32(DspAddress + (OrigAddress + 0) * 2, 0x009AFFFF); // lri $AX0.H, #0xffff
 	W32(DspAddress + (OrigAddress + 2) * 2, 0x2AD62AD7); // srs @ACEAH, $AX0.H/srs @ACEAL, $AX0.H
 	W32(DspAddress + (OrigAddress + 4) * 2, 0x02601000); // ori $AC0.M, 0x1000
 }
 
-void DoDSPPatch( char *ptr, u32 Version )
+static void DoDSPPatch( char *ptr, u32 Version )
 {
 	switch (Version)
 	{
@@ -388,6 +406,12 @@ void DoDSPPatch( char *ptr, u32 Version )
 		{
 			PatchAX_Dsp( (u32)ptr, 0x69E, 0x753, AX_DSP_NO_DUP3, 0xA4 );
 		} break;
+		case 16:	// Pikmin US Demo (Unknown to Dolphin)
+		{
+			// DB8 - unused
+			PatchZelda_Dsp( (u32)ptr, 0x0DB8, 0x00CD, false, false );
+			PatchZelda_Dsp( (u32)ptr, 0x0DB8, 0x0118, false, false );  // same orig instructions
+		} break;
 		default:
 		{
 		} break;
@@ -398,10 +422,8 @@ static bool write32A( u32 Offset, u32 Value, u32 CurrentValue, u32 ShowAssert )
 {
 	if( read32(Offset) != CurrentValue )
 	{
-		#ifdef DEBUG_PATCH
 		//if( ShowAssert)
 			//dbgprintf("AssertFailed: Offset:%08X is:%08X should:%08X\r\n", Offset, read32(Offset), CurrentValue );
-		#endif
 		return false;
 	}
 
@@ -422,26 +444,30 @@ void PatchBL( u32 dst, u32 src )
 	newval|= 0x48000001;
 	*(vu32*)src = newval;
 }
+
 /*
 	This area gets used by IOS, this workaround fixes that problem.
 */
-u32 Pach31A0Backup = 0;
-void Patch31A0( void )
+u32 Patch31A0Backup = 0;
+static void Patch31A0( void )
 {
-	if(Pach31A0Backup == 0)
+	if(Patch31A0Backup == 0)
 		return;
 	u32 PatchOffset = PATCH_OFFSET_START;
-	if(DOLMinOff < 0x31A0)
+	//From Russia with Love stores data here not code so
+	//do NOT add a jump in there, it would break the game
+	if(TITLE_ID != 0x474C5A && DOLMinOff < 0x31A0)
 	{
+		//backup data
 		u32 CurBuf = read32(0x319C);
+		//create jump for it
+		PatchB(PatchOffset, 0x319C);
 		if ((CurBuf & 0xFC000002) == 0x40000000)
 		{
 			u32 Orig = CurBuf;
 			u32 NewAddr = (((s16)(CurBuf & 0xFFFC)) + 0x319C - PatchOffset);
 			CurBuf = (CurBuf & 0xFFFF0003) | NewAddr;
-#ifdef DEBUG_PATCH
 			dbgprintf("319C:Changed 0x%08X to 0x%08X\r\n", Orig, CurBuf);
-#endif
 		}
 		else if ((CurBuf & 0xFC000002) == 0x48000000)
 		{
@@ -450,23 +476,19 @@ void Patch31A0( void )
 			if(BaseAddr & 0x2000000) BaseAddr |= 0xFC000000;
 			u32 NewAddr = (((s32)BaseAddr) + 0x319C - PatchOffset) & 0x3FFFFFC;
 			CurBuf = (CurBuf & 0xFC000003) | NewAddr;
-#ifdef DEBUG_PATCH
 			dbgprintf("319C:Changed 0x%08X to 0x%08X\r\n", Orig, CurBuf);
-#endif
 		}
 		write32(PatchOffset, CurBuf);
 		PatchOffset += 4;
 	}
 
-	u32 CurBuf = Pach31A0Backup;
+	u32 CurBuf = Patch31A0Backup;
 	if ((CurBuf & 0xFC000002) == 0x40000000)
 	{
 		u32 Orig = CurBuf;
 		u32 NewAddr = (((s16)(CurBuf & 0xFFFC)) + 0x31A0 - PatchOffset);
 		CurBuf = (CurBuf & 0xFFFF0003) | NewAddr;
-#ifdef DEBUG_PATCH
 		dbgprintf("31A0:Changed 0x%08X to 0x%08X\r\n", Orig, CurBuf);
-#endif
 	}
 	else if ((CurBuf & 0xFC000002) == 0x48000000)
 	{
@@ -475,18 +497,14 @@ void Patch31A0( void )
 		if(BaseAddr & 0x2000000) BaseAddr |= 0xFC000000;
 		u32 NewAddr = (((s32)BaseAddr) + 0x31A0 - PatchOffset) & 0x3FFFFFC;
 		CurBuf = (CurBuf & 0xFC000003) | NewAddr;
-#ifdef DEBUG_PATCH
 		dbgprintf("31A0:Changed 0x%08X to 0x%08X\r\n", Orig, CurBuf);
-#endif
 	}
 	write32(PatchOffset, CurBuf);
+	if(P2C(GameEntry) == 0x31A0) //terrible case
+		GameEntry = (PatchOffset | (1<<31));
 	PatchOffset += 4;
+	//jump back
 	PatchB(0x31A4, PatchOffset);
-
-	if(P2C(DOLMinOff) < 0x31A0)
-		PatchB(PATCH_OFFSET_START, 0x319C);
-	if(P2C(GameEntry) == 0x13A0)
-		GameEntry = (PATCH_OFFSET_START) | (1<<31);
 }
 
 u32 PatchCopy(const u8 *PatchPtr, const u32 PatchSize)
@@ -731,32 +749,24 @@ void PatchFuncInterface( char *dst, u32 Length )
 			LISReg = 32;
 	}
 
-#ifdef DEBUG_PATCH
 	dbgprintf("Patch:[SI] applied %u times\r\n", SIPatched);
 	if( DisableEXIPatch ) dbgprintf("Patch:[EXI] applied %u times\r\n", EXIPatched);
 	dbgprintf("Patch:[AI] applied %u times\r\n", AIPatched);
 	dbgprintf("Patch:[DI] applied %u times\r\n", DIPatched);
-	#endif
 }
 
-u32 piReg = 0;
-bool PatchProcessorInterface( u32 BufAt0, u32 Buffer )
+static u32 piReg = 0;
+static inline bool PatchProcessorInterface( u32 BufAt0, u32 Buffer )
 {
 	/* Pokemon XD - PI_FIFO_WP Direct */
 	if(BufAt0 == 0x80033014 && (read32(Buffer+12) & 0xFC00FFFF) == 0x540037FE) //extrwi rZ, rY, 1,5
 	{
 		// Extract WRAPPED bit
-		#ifdef DEBUG_PATCH
 		u32 op = read32(Buffer+12);
-		#else
-		read32(Buffer+12);
-		#endif
 		W16(Buffer+14, 0x1FFE);
-		#ifdef DEBUG_PATCH
 		u32 src = (op >> 21) & 0x1F; //rY
 		u32 dst = (op >> 16) & 0x1F; //rZ
 		dbgprintf( "Patch:[PI_FIFO_WP PKM] extrwi r%i,r%i,1,2 (0x%08X)\r\n", dst, src, Buffer+12 );
-		#endif
 		return true;
 	}
 	/* Dolphin SDK - GX __piReg */
@@ -787,10 +797,8 @@ bool PatchProcessorInterface( u32 BufAt0, u32 Buffer )
 					{
 						// Keep WRAPPED bit
 						W16(piRegBuf+lPtr+2, 0x00C2);
-						#ifdef DEBUG_PATCH
 						u32 lDst = (op >> 16) & 0x1F; //rZ
 						dbgprintf( "Patch:[PI_FIFO_WP] rlwinm r%i,r%i,0,3,1 (0x%08X)\r\n", lDst, lSrc, piRegBuf+lPtr );
-						#endif
 						return true;
 					}
 				}
@@ -801,10 +809,8 @@ bool PatchProcessorInterface( u32 BufAt0, u32 Buffer )
 					{
 						// Extract WRAPPED bit
 						W16(piRegBuf+lPtr+2, 0x1FFE);
-						#ifdef DEBUG_PATCH
 						u32 lDst = (op >> 16) & 0x1F; //rZ
 						dbgprintf( "Patch:[PI_FIFO_WP] extrwi r%i,r%i,1,2 (0x%08X)\r\n", lDst, lSrc, piRegBuf+lPtr );
-						#endif
 						return true;
 					}
 				}
@@ -827,10 +833,8 @@ bool PatchProcessorInterface( u32 BufAt0, u32 Buffer )
 					{
 						// Keep WRAPPED bit
 						W16(piRegBuf+sPtr+2, 0x00C2);
-						#ifdef DEBUG_PATCH
 						sSrc = (read32(piRegBuf+sPtr) >> 21) & 0x1F;
 						dbgprintf( "Patch:[PI_FIFO_WP] rlwinm r%i,r%i,0,3,1 (0x%08X)\r\n", sReg, sSrc, piRegBuf+sPtr );
-						#endif
 						return true;
 					}
 				}
@@ -887,20 +891,94 @@ void PatchPatchBuffer(char *dst)
 	}
 }
 
-bool GameNeedsHook()
+static bool IsPokemonDemo()
+{
+	if( (DOLSize == 4101476 && DOLMinOff == 0x3100 && DOLMaxOff == 0x4CCFE0 &&
+		read32(0x27EA58) == 0x504F4BE9 && read32(0x27EA5C) == 0x4D4F4E20) || //Colosseum EUR
+		(DOLSize == 4336100 && DOLMinOff == 0x3100 && DOLMaxOff == 0x4F14C0 &&
+		read32(0x2F89DC) == 0x504F4B65 && read32(0x2F89E0) == 0x4D4F4E20) || //Pokemon XD USA
+		(DOLSize == 4548516 && DOLMinOff == 0x3100 && DOLMaxOff == 0x520D20 &&
+		read32(0x2F3AE4) == 0x504F4B65 && read32(0x2F3AE8) == 0x4D4F4E20) )  //Pokemon XD EUR
+	{
+		dbgprintf("Patch:Detected Pokemon Demo, using memset patches\r\n");
+		return true;
+	}
+	return false;
+}
+
+static bool DemoNeedsPaperMarioDMA()
+{
+	if( (DOLSize == 3983396 && DOLMinOff == 0x3100 && DOLMaxOff == 0x41E4E0 &&
+		read32(0x2BB458) == 0x50415045 && read32(0x2BB45C) == 0x52435241) || //Paper Mario RPG JAP
+		(DOLSize == 3984836 && DOLMinOff == 0x3100 && DOLMaxOff == 0x41EA80 &&
+		read32(0x2BB818) == 0x50415045 && read32(0x2BB81C) == 0x52435241) || //Paper Mario 2 USA
+		(DOLSize == 4019876 && DOLMinOff == 0x3100 && DOLMaxOff == 0x429140 &&
+		read32(0x2BF4C0) == 0x50415045 && read32(0x2BF4C4) == 0x52435241) || //Paper Mario TTYD USA
+		(DOLSize == 4068836 && DOLMinOff == 0x3100 && DOLMaxOff == 0x4359C0 &&
+		read32(0x2CAF00) == 0x50415045 && read32(0x2CAF04) == 0x52435241) )  //Paper Mario TTYD EUR
+	{
+		dbgprintf("Patch:Known Problematic Demo, using ARStartDMA_PM\r\n");
+		return true;
+	}
+	return false;
+}
+
+static bool DemoNeedsPostRequest()
+{
+	if( (DOLSize == 4107972 && DOLMinOff == 0x3100 && DOLMaxOff == 0x412760 &&
+		read32(0x3768E0) == 0x53756E73 && read32(0x3768E4) == 0x68696E65) || //Sunshine JAP
+		(DOLSize == 4123684 && DOLMinOff == 0x3100 && DOLMaxOff == 0x416460 &&
+		read32(0x3A61AC) == 0x53756E73 && read32(0x3A61B0) == 0x68696E65) || //Sunshine EUR
+		(DOLSize == 4124068 && DOLMinOff == 0x3100 && DOLMaxOff == 0x4165E0 &&
+		read32(0x3A632C) == 0x53756E73 && read32(0x3A6330) == 0x68696E65) || //Sunshine USA
+		(DOLSize == 3731268 && DOLMinOff == 0x3100 && DOLMaxOff == 0x4CD360 &&
+		read32(0x377900) == 0x4D616E73 && read32(0x377904) == 0x696F6E00) || //Luigis Mansion EUR
+		(DOLSize == 3808868 && DOLMinOff == 0x3100 && DOLMaxOff == 0x4DFE80 &&
+		read32(0x38AAD0) == 0x4D616E73 && read32(0x38AAD4) == 0x696F6E00) || //Luigis Mansion USA
+		(DOLSize == 3102820 && DOLMinOff == 0x3100 && DOLMaxOff == 0x3EC180 &&
+		read32(0x2AA53C) == 0x50696B6D && read32(0x2AA540) == 0x696E2064) || //Pikmin EUR
+		(DOLSize == 3110372 && DOLMinOff == 0x3100 && DOLMaxOff == 0x3EE780 &&
+		read32(0x2AC2BC) == 0x50696B6D && read32(0x2AC2C0) == 0x696E2064) )  //Pikmin USA
+	{
+		dbgprintf("Patch:Known Problematic Demo, using ARQPostRequest\r\n");
+		return true;
+	}
+	return false;
+}
+
+static bool DemoNeedsHookPatch()
+{
+	if( (DOLSize == 2044804 && DOLMinOff == 0x3100 && DOLMaxOff == 0x2EE600 &&
+		read32(0x1A9CA8) == 0x4A4F4520 && read32(0x1A9CAC) == 0x4D555354) || //Viewtiful Joe USA
+		(DOLSize == 2044804 && DOLMinOff == 0x3100 && DOLMaxOff == 0x2EE600 &&
+		read32(0x1A9CE8) == 0x4A4F4520 && read32(0x1A9CEC) == 0x4D555354) || //Viewtiful Joe JAP
+		(DOLSize == 2556708 && DOLMinOff == 0x3100 && DOLMaxOff == 0x3732A0 &&
+		read32(0x20A1D0) == 0x4A4F4520 && read32(0x20A1D4) == 0x4D555354) || //Viewtiful Joe EUR
+		(DOLSize == 2176260 && DOLMinOff == 0x3100 && DOLMaxOff == 0x2D99A0 &&
+		read32(0x1CF268) == 0x62696F68 && read32(0x1CF26C) == 0x617A6172) || //Biohazard 4 JAP
+		(DOLSize == 2177508 && DOLMinOff == 0x3100 && DOLMaxOff == 0x2FDCE0 &&
+		read32(0x1D2A00) == 0x62696F68 && read32(0x1D2A04) == 0x617A6172) )  //Resident Evil 4 USA
+	{
+		dbgprintf("Patch:Known Problematic Demo, using ARStartDMA_Hook\r\n");
+		return true;
+	}
+	return false;
+}
+
+static bool GameNeedsHook()
 {
 	if( (TITLE_ID) == 0x473258 )	// Sonic Gems Collection
 		return (DOLSize != 1440100 && DOLSize != 1439812); //Everything except Sonic Fighters
 
 	return( (TITLE_ID) == 0x474234 ||	// Burnout 2
 			(TITLE_ID) == 0x47564A ||	// Viewtiful Joe
+			(TITLE_ID) == 0x474145 ||	// Doubutsu no Mori e+
 			(TITLE_ID) == 0x474146 ||	// Animal Crossing
 			(TITLE_ID) == 0x475852 ||	// Mega Man X Command Mission
 			(TITLE_ID) == 0x474832 ||	// NFS: HP2
 			(TITLE_ID) == 0x474156 ||	// Avatar Last Airbender
 			(TITLE_ID) == 0x47484E ||	// Hunter the Reckoning
 			(TITLE_ID) == 0x473442 ||	// Resident Evil 4
-			(TITLE_ID) == 0x503442 ||	// Resident Evil 4 (Demo)
 			(TITLE_ID) == 0x474856 ||	// Disneys Hide and Sneak
 			(TITLE_ID) == 0x474353 ||	// Street Racing Syndicate
 			(TITLE_ID) == 0x474241 ||	// NBA 2k2
@@ -910,14 +988,20 @@ bool GameNeedsHook()
 			(TITLE_ID) == 0x47504C ||	// Piglet's Big Game
 			(TITLE_ID) == 0x475951 ||	// Mario Superstar Baseball
 			(TITLE_ID) == 0x47534F ||	// Sonic Mega Collection
-			(GAME_ID) == 0x4747504A);	// SD Gundam Gashapon Wars
+			(GAME_ID) == 0x4747504A ||	// SD Gundam Gashapon Wars
+			DemoNeedsHookPatch() );
 }
 
-bool PADSwitchRequired()
+static inline bool PADSwitchRequired()
 {
 	return( (TITLE_ID) == 0x47434F ||	// Call of Duty
 			(TITLE_ID) == 0x475449 ||	// Tiger Woods PGA Tour 2003
 			(TITLE_ID) == 0x475734 );	// Tiger Woods PGA Tour 2004
+}
+
+static inline bool PADForceConnected()
+{
+	return( (TITLE_ID) == 0x474C5A ); // 007 From Russia With Love
 }
 
 void MPattern(u8 *Data, u32 Length, FuncPattern *FunctionPattern)
@@ -926,7 +1010,7 @@ void MPattern(u8 *Data, u32 Length, FuncPattern *FunctionPattern)
 
 	memset32( FunctionPattern, 0, sizeof(FuncPattern) );
 
-	for( i = 0; i < Length; i+=4 )
+	for( i = 0; i <= Length; i+=4 )
 	{
 		u32 word = *(u32*)(Data + i);
 
@@ -983,7 +1067,8 @@ void SRAM_Checksum( unsigned short *buf, unsigned short *c1, unsigned short *c2)
 	//dbgprintf("New Checksum: %04X %04X\r\n", *c1, *c2 );
 }
 
-char *getVidStr(u32 in)
+#ifdef DEBUG_PATCH
+static const char *getVidStr(u32 in)
 {
 	switch(in)
 	{
@@ -1002,7 +1087,6 @@ char *getVidStr(u32 in)
 	}
 }
 
-#ifdef DEBUG_PATCH
 static inline void printvidpatch(u32 ori_v, u32 new_v, u32 addr)
 {
 	dbgprintf("Patch:Replaced %s with %s (0x%08X)\r\n", getVidStr(ori_v), getVidStr(new_v), addr );
@@ -1017,55 +1101,30 @@ static inline void printpatchfound(const char *name, const char *type, u32 offse
 #define printpatchfound(...)
 #endif
 
-int GotoFuncStart(int i, u32 Buffer)
+static int GotoFuncStart(int i, u32 Buffer)
 {
 	while( read32(Buffer + i - 4) != 0x4E800020 )
 		i -= 4;
 	return i;
 }
 
-int GotoFuncEnd(int i, u32 Buffer)
+static int GotoFuncEnd(int i, u32 Buffer)
 {
 	do {
 		i += 4; //known function, skip over it
 	} while( read32(Buffer + i) != 0x4E800020 );
 	return i;
 }
-void *OurBase = (void*)0x13002780;
-void TRIWriteSettings(char *name, void *GameBase, u32 size)
+
+static bool fileExist( char *path )
 {
-	sync_before_read_align32(GameBase, size);
-	sync_before_read_align32(OurBase, size);
-	if((memcmp(OurBase, GameBase, size) != 0) && (memcmp(GameBase, "SB", 2) == 0))
+	FIL fd;
+	if( f_open_char( &fd, path, FA_OPEN_EXISTING|FA_READ ) == FR_OK )
 	{
-		dbgprintf("TRI:Writing Settings\r\n");
-		memcpy(OurBase, GameBase, size);
-		FIL backup;
-		if(f_open_char(&backup, name, FA_WRITE | FA_CREATE_ALWAYS) == FR_OK)
-		{
-			u32 wrote;
-			f_write(&backup, OurBase, size, &wrote);
-			f_close(&backup);
-		}
-		sync_after_write_align32(OurBase, size);
-		TRI_BackupAvailable = 1;
+		f_close( &fd );
+		return true;
 	}
-}
-void TRIReadSettings(char *name, u32 size)
-{
-	FIL backup;
-	if (f_open_char(&backup, name, FA_OPEN_EXISTING | FA_READ) == FR_OK)
-	{
-		if(backup.fsize == size)
-		{
-			dbgprintf("TRI:Reading Settings\r\n");
-			u32 read;
-			f_read(&backup, OurBase, size, &read);
-			sync_after_write_align32(OurBase, size);
-			TRI_BackupAvailable = 1;
-		}
-		f_close(&backup);
-	}
+	return false;
 }
 
 void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
@@ -1081,36 +1140,30 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 	u32 value = 0;
 
 	// PSO 1&2 / III
+	u32 isPSO = 0;
 	if (((TITLE_ID) == 0x47504F) || ((TITLE_ID) == 0x475053))
 	{
+		isPSO = 1;
 		if((PSOHack & PSO_STATE_SWITCH) && DiscOffset > 0)
 		{
-			#ifdef DEBUG_PATCH
 			dbgprintf("PSO:psov3.dol\r\n");
-			#endif
 			PSOHack = PSO_STATE_LOAD | PSO_STATE_NOENTRY;
 		}
 		if(Length == 0x318E0 && read32((u32)Buffer+0x318B0) == 0x4CBEBC20)
 		{
-			#ifdef DEBUG_PATCH
 			dbgprintf("PSO:switcher.dol\r\n");
-			#endif
 			PSOHack = PSO_STATE_LOAD | PSO_STATE_SWITCH;
 		}
 		else if(Length == 0x1B8A0 && read32((u32)Buffer+0x12E0C) == 0x7FA4E378)
 		{
-			#ifdef DEBUG_PATCH
 			dbgprintf("PSO:switcherD.dol\r\n");
-			#endif
 			PSOHack = PSO_STATE_LOAD | PSO_STATE_SWITCH;
 		}
 		else if((Length == 0x19580 && read32((u32)Buffer+0x19560) == 0xC8BFAF78) || //PSO Plus
 				(Length == 0x19EA0 && read32((u32)Buffer+0x19E80) == 0x24C7E996) || //PSO 3 PAL
 				(Length == 0x1A2C0 && read32((u32)Buffer+0x1A2A0) == 0xE2BEE1FF))   //PSO 3 NTSC
 		{
-			#ifdef DEBUG_PATCH
 			dbgprintf("PSO:switcher.prs\r\n");
-			#endif
 			PSOHack = PSO_STATE_LOAD | PSO_STATE_PSR | PSO_STATE_SWITCH;
 		}
 	}
@@ -1126,9 +1179,7 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 				} break;
 				case 0x00003100:	// Datel DOL
 				{
-#ifdef DEBUG_PATCH
 					dbgprintf("Patch:Datel loading dol:0x%p %u\r\n", Buffer, Length);
-#endif
 					DOLSize = Length;
 					DOLMinOff = (u32)Buffer;
 					DOLMaxOff = DOLMinOff + Length;
@@ -1206,9 +1257,9 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 				//	DOLMinOff = (u32)Buffer;
 				//	DOLMaxOff = (u32)Buffer + DOLSize;
 				//}
-#ifdef DEBUG_DI
+//#ifdef DEBUG_DI
 				dbgprintf("DIP:DOL Size:%d MinOff:0x%08X MaxOff:0x%08X\r\n", DOLSize, DOLMinOff, DOLMaxOff );
-#endif
+//#endif
 				/* Hack Position */
 				GameEntry = dol->entrypoint;
 				if (!(PSOHack & PSO_STATE_NOENTRY))
@@ -1258,9 +1309,9 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 			}
 			DOLMinOff -= 0x80000000;
 			DOLMaxOff -= 0x80000000;
-#ifdef DEBUG_DI
+//#ifdef DEBUG_DI
 			dbgprintf("DIP:ELF Size:%d MinOff:0x%08X MaxOff:0x%08X\r\n", DOLSize, DOLMinOff, DOLMaxOff );
-#endif
+//#endif
 			/* Hack Position */
 			GameEntry = ehdr->e_entry;
 			ehdr->e_entry = PATCH_OFFSET_ENTRY + 0x80000000;
@@ -1276,7 +1327,7 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 			NewVal |= 0x48000000;
 			FirstLine = read32((u32)Buffer+0xB4);
 			write32((u32)Buffer+0xB4, NewVal);
-			dbgprintf("DIP:Hacked ELF FirstLine:0x%08X MinOff:0x%08X MaxOff:0x%08X\r\n", FirstLine, DOLMinOff, DOLMaxOff );
+			dbgprintf("DIP:Hacked ELF FirstLine:0x%08X Size:%d MinOff:0x%08X MaxOff:0x%08X\r\n", FirstLine, DOLSize, DOLMinOff, DOLMaxOff );
 			PatchState |= PATCH_STATE_LOAD;
 		}
 	}
@@ -1288,10 +1339,7 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 		DOLMinOff = (u32)Buffer;
 		DOLMaxOff = DOLMinOff + Length;
 		/* Make sure to backup ingame settings */
-		if(TRIGame == TRI_VS4)
-			TRIWriteSettings("/saves/VS4settings.bin", (void*)0x69E4E0, 0x2B);
-		else if(TRIGame == TRI_AX)
-			TRIWriteSettings("/saves/AXsettings.bin", (void*)0x3CFBD0, 0x2B);
+		TRIBackupSettings();
 	}
 
 	if( TRIGame == TRI_SB && Length == 0x1C0 && *((vu8*)Buffer+0x0F) == 0x06 )
@@ -1319,9 +1367,9 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 		PatchBL(PatchCopy(SonicRidersCopy, SonicRidersCopy_size), SONICRIDERS_HOOK_PAL);
 		dbgprintf("Patch:Patched Sonic Riders _Main.rel PAL\r\n");
 	}
-	else if( (TITLE_ID) == 0x474842 && useipl == 0 )
+	else if( ((TITLE_ID) == 0x474842 || (TITLE_ID) == 0x47505A) && useipl == 0 )
 	{
-		/* Agressive Timer Patches for The Hobbit */
+		/* Agressive Timer Patches for The Hobbit and Nintendo Puzzle Collection */
 		u32 t;
 		for(t = 0; t < Length; t+=4) //make sure its patched at all times
 			PatchTimers(read32((u32)Buffer+t), (u32)Buffer+t);
@@ -1329,6 +1377,8 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 
 	if (!(PatchState & PATCH_STATE_PATCH))
 		return;
+	u32 DSPHandlerNeeded = 1;
+	IsN64Emu = 0;
 	piReg = 0;
 
 	sync_after_write(Buffer, Length);
@@ -1336,10 +1386,8 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 	Buffer = (char*)DOLMinOff;
 	Length = DOLMaxOff - DOLMinOff;
 
-#ifdef DEBUG_PATCH
 	dbgprintf("Patch:Offset:0x%08X EOffset:0x%08X Length:%08X\r\n", Buffer, DOLMaxOff, Length );
-	dbgprintf("Patch:Game ID = %x\r\n", read32(0));
-#endif
+	dbgprintf("Patch:Game ID = %x\r\n", GAME_ID);
 
 	sync_before_read(Buffer, Length);
 
@@ -1367,297 +1415,125 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 
 	u32 DatelTimerAddr = PatchCopy(DatelTimer, DatelTimer_size);
 
-	if(( TITLE_ID == 0x475858 ) || ( TITLE_ID == 0x474336 ))
+	TRISetupGames();
+	if(TRIGame == TRI_NONE)
 	{
-		// patch out initial memset(0x1800, 0, 0x1800)
-		if( (read32(0) & 0xFF) == 0x4A )	// JAP
-			write32( 0x560C, 0x60000000 );
-		else								// EUR/USA
-			write32( 0x5614, 0x60000000 );
-
-		// patch memset to jump to test function
-		write32(0x00005498, 0x4BFFABF0);
-
-		// patch in test < 0x3000 function
-		write32(0x00000088, 0x3D008000);
-		write32(0x0000008C, 0x61083000);
-		write32(0x00000090, 0x7C044000);
-		write32(0x00000094, 0x4180542C);
-		write32(0x00000098, 0x90E40004);
-		write32(0x0000009C, 0x48005400);
-
-		// skips __start init of debugger mem
-		write32(0x00003194, 0x48000028);
-	}
-
-	if( read32(0x023D240) == 0x386000A8 )
-	{
-		dbgprintf("TRI:Mario Kart GP1\r\n");
-		TRIGame = TRI_GP1;
-		SystemRegion = REGION_JAPAN;
-
-		//Unlimited CARD uses
-		write32( 0x01F5C44, 0x60000000 );
-
-		//Disable cam
-		write32( 0x00790A0, 0x98650025 );
-
-		//Disable CARD
-		//write32( 0x00790B4, 0x98650023 );
-		//write32( 0x00790CC, 0x98650023 );
-
-		//Disable wheel/handle
-		write32( 0x007909C, 0x98650022 );
-
-		//VS wait
-		write32( 0x00BE10C, 0x4800002C );
-
-		//cam loop
-		write32( 0x009F1E0, 0x60000000 );
-
-		//Enter test mode (anti-freeze)
-		write32( 0x0031BF0, 0x60000000 );
-		//Allow test menu if requested
-		PatchBL( PatchCopy(CheckTestMenu, CheckTestMenu_size), 0x31BF4 );
-
-		//Remove some menu timers
-		write32( 0x0019BFF8, 0x60000000 ); //card check
-		write32( 0x001BCAA8, 0x60000000 ); //want to make a card
-		write32( 0x00195748, 0x60000000 ); //card view
-		write32( 0x000CFABC, 0x60000000 ); //select game mode
-		write32( 0x000D9F14, 0x60000000 ); //select character
-		write32( 0x001A8CF8, 0x60000000 ); //select cup
-		write32( 0x001A89B8, 0x60000000 ); //select round
-		write32( 0x001A36CC, 0x60000000 ); //select item pack (card)
-		write32( 0x001A2A10, 0x60000000 ); //select item (card)
-		write32( 0x001B9724, 0x60000000 ); //continue
-		write32( 0x001E61B4, 0x60000000 ); //rewrite rank
-		write32( 0x001A822C, 0x60000000 ); //select course p1 (time attack)
-		write32( 0x001A7F0C, 0x60000000 ); //select course p2 (time attack)
-		write32( 0x000D6234, 0x60000000 ); //enter name (time attack, card)
-		write32( 0x001BF1DC, 0x60000000 ); //save record p1 (time attack on card)
-		write32( 0x001BF1DC, 0x60000000 ); //save record p2 (time attack on card)
-		write32( 0x000E01B4, 0x60000000 ); //select record place (time attack on card)
-
-		//Modify to regular GX pattern to patch later
-		write32( 0x363660, 0x00 ); //NTSC Interlaced
-
-		//Test Menu Interlaced
-		//memcpy( (void*)0x036369C, (void*)0x040EB88, 0x3C );
-
-		//PAD Hook for control updates
-		PatchBL(PatchCopy(PADReadGP, PADReadGP_size), 0x3C2A0 );
-
-		//some report check skip
-		//write32( 0x00307CC, 0x60000000 );
-
-		//memcpy( (void*)0x00330BC, OSReportDM, sizeof(OSReportDM) );
-		//memcpy( (void*)0x0030710, OSReportDM, sizeof(OSReportDM) );
-		//memcpy( (void*)0x0030760, OSReportDM, sizeof(OSReportDM) );
-		//memcpy( (void*)0x020CBCC, OSReportDM, sizeof(OSReportDM) );	// UNkReport
-		//memcpy( (void*)0x02281B8, OSReportDM, sizeof(OSReportDM) );	// UNkReport4
-	}
-	else if (read32(0x02856EC) == 0x386000A8)
-	{
-		dbgprintf("TRI:Mario Kart GP2\r\n");
-		TRIGame = TRI_GP2;
-		SystemRegion = REGION_JAPAN;
-
-		//Unlimited CARD uses
-		write32( 0x00A02F8, 0x60000000 );
-
-		//Enter test mode (anti-freeze)
-		write32( 0x002E340, 0x60000000 );
-		//Allow test menu if requested
-		PatchBL( PatchCopy(CheckTestMenu, CheckTestMenu_size), 0x2E344 );
-
-		//Disable wheel
-		write32( 0x007909C, 0x98650022 );
-
-		//Disable CARD
-		//write32( 0x0073BF4, 0x98650023 );
-		//write32( 0x0073C10, 0x98650023 );
-
-		//Disable cam
-		write32( 0x0073BD8, 0x98650025 );
-
-		//Disable red item button
-		write32( 0x0073C98, 0x98BF0045 );
-
-		//VS wait patch 
-		write32( 0x0084FC4, 0x4800000C );
-		write32( 0x0085000, 0x60000000 );
-
-		//Game vol
-		//write32( 0x00790E8, 0x39000009 );
-
-		//Attract vol
-		//write32( 0x00790F4, 0x38C0000C );
-
-		//Disable Commentary (sets volume to 0 )
-		//write32( 0x001B6510, 0x38800000 );
-
-		//Patches the analog input count
-		write32( 0x000392F4, 0x38000003 );
-
-		//Remove some menu timers (thanks conanac)
-		write32( 0x001C1074, 0x60000000 ); //card check
-		write32( 0x001C0174, 0x60000000 ); //want to make a card
-		write32( 0x00232818, 0x60000000 ); //card view
-		write32( 0x001C1A08, 0x60000000 ); //select game mode
-		write32( 0x001C3380, 0x60000000 ); //select character
-		write32( 0x001D7594, 0x60000000 ); //select kart
-		write32( 0x001C7A7C, 0x60000000 ); //select cup
-		write32( 0x001C9ED8, 0x60000000 ); //select round
-		write32( 0x00237B3C, 0x60000000 ); //select item (card)
-		write32( 0x0024D35C, 0x60000000 ); //continue
-		write32( 0x0015F2F4, 0x60000000 ); //rewrite rank
-		write32( 0x001CF5DC, 0x60000000 ); //select course (time attack)
-		write32( 0x001BE248, 0x60000000 ); //enter name (time attack, card)
-		write32( 0x0021DFF0, 0x60000000 ); //save record (time attack on card)
-
-		//Make some menu timers invisible
-		write32( 0x001B7D2C, 0x60000000 );
-		write32( 0x00231CA0, 0x60000000 );
-
-		//Modify to regular GX pattern to patch later
-		write32( 0x3F1FD0, 0x00 ); //NTSC Interlaced
-
-		//PAD Hook for control updates
-		PatchBL(PatchCopy(PADReadGP, PADReadGP_size), 0x38A34 );
-
-		//memcpy( (void*)0x002CE3C, OSReportDM, sizeof(OSReportDM) );
-		//memcpy( (void*)0x002CE8C, OSReportDM, sizeof(OSReportDM) );
-		//write32( 0x002CEF8, 0x60000000 );
-	}
-	else if( read32(0x01851C4) == 0x386000A8 )
-	{
-		dbgprintf("TRI:F-Zero AX\r\n");
-		TRIGame = TRI_AX;
-		SystemRegion = REGION_JAPAN;
-		DISetDIMMVersion(0x12301777);
-
-		//Reset loop
-		write32( 0x01B5410, 0x60000000 );
-
-		//DBGRead fix
-		write32( 0x01BEF38, 0x60000000 );
-
-		//Disable CARD
-		//write32( 0x017B2BC, 0x38C00000 );
-
-		//Motor init patch
-		write32( 0x0175710, 0x60000000 );
-		write32( 0x0175714, 0x60000000 );
-		write32( 0x01756AC, 0x60000000 );
-
-		//patching system waiting stuff
-		write32( 0x0180DB8, 0x48000054 );
-		write32( 0x0180E1C, 0x48000054 );
-
-		//Network waiting
-		write32( 0x0180FD8, 0x4800004C );
-
-		//Goto Test menu
-		write32( 0x00DF3D0, 0x60000000 );
-		//Allow test menu if requested
-		PatchBL( PatchCopy(CheckTestMenu, CheckTestMenu_size), 0xDF3D4 );
-
-		//Replace Motor Init with Controller Setup
-		write32( 0x0024E034, 0x80180D5C );
-		write32( 0x0024E038, 0x80180BC0 );
-
-		//Call Important Init Function
-		PatchB( 0x000DA6D4, 0x00180D9C );
-
-		//Remove Overscan on first VIConfigure
-		write32( 0x001FBE54, 0x38C00000 );
-
-		//English
-		write32( 0x000DF698, 0x38000000 );
-
-		//Remove some menu timers (thanks dj_skual)
-		// (menu gets constantly removed in JVSIO.c)
-		write32( 0x0015B148, 0x60000000 ); //after race
-
-		//Make some menu timers invisible (thanks dj_skual)
-		write32( 0x0023759C, 0x40200000 ); //menu inner
-		write32( 0x002375D4, 0x40200000 ); //menu outer
-		write32( 0x00237334, 0x00000000 ); //after race inner
-		write32( 0x0023736C, 0x00000000 ); //after race outer
-
-		//Check for already existing settings
-		if(TRI_BackupAvailable == 0)
-			TRIReadSettings("/saves/AXsettings.bin", 0x2B);
-		//Custom backup handler
-		if(TRI_BackupAvailable == 1)
-			PatchB(PatchCopy(RestoreSettingsAX, RestoreSettingsAX_size), 0x17B490);
-
-		//Modify to regular GX pattern to patch later
-		u32 NTSC480ProgTri = 0x21D3EC;
-		write32(NTSC480ProgTri, 0x00); //NTSC Interlaced
-		write32(NTSC480ProgTri + 0x14, 0x01); //Mode DF
-
-		NTSC480ProgTri = 0x302AC0;
-		write32(NTSC480ProgTri, 0x00); //NTSC Interlaced
-		write32(NTSC480ProgTri + 0x14, 0x01); //Mode DF
-
-		//PAD Hook for control updates
-		PatchBL( PatchCopy(PADReadF, PADReadF_size), 0x1B4368 );
-
-		//memcpy( (void*)0x01CAACC, patch_fwrite_GC, sizeof(patch_fwrite_GC) );
-		//memcpy( (void*)0x01882C0, OSReportDM, sizeof(OSReportDM) );
-
-		//Unkreport
-		//PatchB( 0x01882C0, 0x0191B54 );
-		//PatchB( 0x01882C0, 0x01C53CC );
-		//PatchB( 0x01882C0, 0x01CC684 );
-	}
-	else if( read32( 0x0210C08 ) == 0x386000A8 )
-	{
-		dbgprintf("TRI:Virtua Striker 4 Ver 2006 (EXPORT)\r\n");
-		TRIGame = TRI_VS4;
-		SystemRegion = REGION_USA;
-		DISetDIMMVersion(0xA3A479);
-
-		//BOOT/FIRM version mismatch patch (not needed with SegaBoot)
-		write32( 0x0051924, 0x60000000 );
-
-		//Set menu timer to about 51 days
-		write32( 0x00CBB7C, 0x3C800FFF );
-
-		//Allow test menu if requested
-		PatchBL( PatchCopy(CheckTestMenuVS, CheckTestMenuVS_size), 0x3B804 );
-
-		//Check for already existing settings
-		if(TRI_BackupAvailable == 0)
-			TRIReadSettings("/saves/VS4settings.bin", 0x2B);
-		//Custom backup handler
-		if(TRI_BackupAvailable == 1)
-			PatchB(PatchCopy(RestoreSettingsVS, RestoreSettingsVS_size), 0x12BD4);
-
-		//Modify to regular GX pattern to patch later
-		write32( 0x26DD38, 0x00 ); //NTSC Interlaced
-
-		//PAD Hook for control updates
-		PatchBL(PatchCopy(PADReadVS, PADReadVS_size), 0x3C504 );
-
-		//memcpy( (void*)0x001C2B80, OSReportDM, sizeof(OSReportDM) );
-	}
-	else if(useipltri)
-	{
-		if( read32( 0x00055F98 ) == 0x386000A8 )
+		if(( TITLE_ID == 0x475858 ) || ( TITLE_ID == 0x474336 ) // Colosseum and XD
+			|| ( GAME_ID == 0x5043534A && Length == 0x479900 ) // Colosseum Bonus
+			|| IsPokemonDemo() )
 		{
-			write32(0x000627A4, 0x3C808006); //lis r4, 0x8006
-			write32(0x000627AC, 0x6084E93C); //ori r4, r4, 0xE93C
-			write32(0x0006E93C, 0x01010A01); //modify 0x8006E93C for Free Play
-			dbgprintf("TRI:SegaBoot (Patched Free Play)\r\n");
-		}
-		else
-			dbgprintf("TRI:SegaBoot\r\n");
-		TRIGame = TRI_SB;
-	}
+			dbgprintf("Patch:[Pokemon memset] applied\r\n");
+			// patch out initial memset(0x1800, 0, 0x1800)
+			if( (read32(0) & 0xFF) == 0x4A )	// JAP
+				write32( 0x560C, 0x60000000 );
+			else								// EUR/USA
+				write32( 0x5614, 0x60000000 );
 
+			// patch memset to jump to test function
+			write32(0x00005498, 0x4BFFABF0);
+
+			// patch in test < 0x3000 function
+			write32(0x00000088, 0x3D008000);
+			write32(0x0000008C, 0x61083000);
+			write32(0x00000090, 0x7C044000);
+			write32(0x00000094, 0x4180542C);
+			write32(0x00000098, 0x90E40004);
+			write32(0x0000009C, 0x48005400);
+
+			// skips __start init of debugger mem
+			write32(0x00003194, 0x48000028);
+		}
+		else if(read32(0xF278C) == 0x2F6D616A) //Majoras Mask NTSC-U
+		{
+			dbgprintf("Patch:[Majoras Mask NTSC-U] applied\r\n");
+			//save up regs
+			u32 majora_save = PatchCopy(MajoraSaveRegs, MajoraSaveRegs_size);
+			PatchB(majora_save, 0x1CDD4);
+			PatchB(0x1CDD8, majora_save+MajoraSaveRegs_size-4);
+			//frees r28 and secures r10 for us
+			write32(0x1CE8C, 0x60000000);
+			write32(0x1CE90, 0x839D0000);
+			write32(0x1CE94, 0x7D3C4AAE);
+			//do audio streaming injection
+			u32 majora_as = PatchCopy(MajoraAudioStream, MajoraAudioStream_size);
+			PatchB(majora_as, 0x1CEA4);
+			PatchB(0x1CEA8, majora_as+MajoraAudioStream_size-4);
+			//load up regs (and jump back)
+			PatchB(PatchCopy(MajoraLoadRegs, MajoraLoadRegs_size), 0x1CF98);
+			DSPHandlerNeeded = 0;
+			IsN64Emu = 1;
+		}
+		else if(read32(0xF624C) == 0x2F6D616A) //Majoras Mask NTSC-U
+		{
+			dbgprintf("Patch:[Majoras Mask NTSC-J] applied\r\n");
+			//save up regs
+			u32 majora_save = PatchCopy(MajoraSaveRegs, MajoraSaveRegs_size);
+			PatchB(majora_save, 0x1D448);
+			PatchB(0x1D44C, majora_save+MajoraSaveRegs_size-4);
+			//frees r28 and secures r10 for us
+			write32(0x1D500, 0x60000000);
+			write32(0x1D504, 0x839D0000);
+			write32(0x1D508, 0x7D3C4AAE);
+			//do audio streaming injection
+			u32 majora_as = PatchCopy(MajoraAudioStream, MajoraAudioStream_size);
+			PatchB(majora_as, 0x1D518);
+			PatchB(0x1D51C, majora_as+MajoraAudioStream_size-4);
+			//load up regs (and jump back)
+			PatchB(PatchCopy(MajoraLoadRegs, MajoraLoadRegs_size), 0x1D60C);
+			DSPHandlerNeeded = 0;
+			IsN64Emu = 1;
+		}
+		else if(read32(0xE16D8) == 0x2F6D616A) //Majoras Mask PAL
+		{
+			dbgprintf("Patch:[Majoras Mask PAL] applied\r\n");
+			//save up regs
+			u32 majora_save = PatchCopy(MajoraSaveRegs, MajoraSaveRegs_size);
+			PatchB(majora_save, 0x1D6B4);
+			PatchB(0x1D6B8, majora_save+MajoraSaveRegs_size-4);
+			//frees r28 and secures r10 for us
+			write32(0x1D76C, 0x60000000);
+			write32(0x1D770, 0x839D0000);
+			write32(0x1D774, 0x7D3C4AAE);
+			//do audio streaming injection
+			u32 majora_as = PatchCopy(MajoraAudioStream, MajoraAudioStream_size);
+			PatchB(majora_as, 0x1D784);
+			PatchB(0x1D788, majora_as+MajoraAudioStream_size-4);
+			//load up regs (and jump back)
+			PatchB(PatchCopy(MajoraLoadRegs, MajoraLoadRegs_size), 0x1D878);
+			DSPHandlerNeeded = 0;
+			IsN64Emu = 1;
+		}
+		else if(read32(0x1373E8) == 0x5A454C44) //Ocarina of Time NTSC-U
+		{
+			dbgprintf("Patch:[Ocarina of Time NTSC-U]\r\n");
+			IsN64Emu = 1;
+		}
+		else if(read32(0x134EE8) == 0x5A454C44) //Ocarina of Time NTSC-J
+		{
+			dbgprintf("Patch:[Ocarina of Time NTSC-J]\r\n");
+			IsN64Emu = 1;
+		}
+		else if(read32(0x181200) == 0x5A454C44) //Ocarina of Time PAL
+		{
+			dbgprintf("Patch:[Ocarina of Time PAL]\r\n");
+			IsN64Emu = 1;
+		}
+		else if(read32(0x1356B8) == 0x5A454C44) //OOT Bonus Disc NTSC-U
+		{
+			dbgprintf("Patch:[OOT Bonus Disc NTSC-U]\r\n");
+			IsN64Emu = 1;
+		}
+		else if(read32(0x18B178) == 0x5A454C44) //OOT Bonus Disc NTSC-J
+		{
+			dbgprintf("Patch:[OOT Bonus Disc NTSC-J]\r\n");
+			IsN64Emu = 1;
+		}
+		else if(read32(0x1582F0) == 0x5A454C44) //OOT Bonus Disc PAL
+		{
+			dbgprintf("Patch:[OOT Bonus Disc PAL]\r\n");
+			IsN64Emu = 1;
+		}
+	}
 	DisableEXIPatch = (TRIGame == TRI_NONE && ConfigGetConfig(NIN_CFG_MEMCARDEMU) == false);
 	DisableSIPatch = (TRIGame == TRI_NONE && ConfigGetConfig(NIN_CFG_NATIVE_SI));
 
@@ -1669,35 +1545,61 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 		PatchWide = false;
 
 	PatchFuncInterface( Buffer, Length );
-	sync_after_write( Buffer, Length );
-	sync_before_read( Buffer, Length );
 
-	u32 PatchCount = FPATCH_OSSleepThread | FPATCH_VideoModes;
+	u32 PatchCount = FPATCH_VideoModes | 
+		FPATCH_OSSleepThread | FPATCH_GXBegin | FPATCH_GXDrawDone;
 #ifdef CHEATS
-	if( IsWiiU )
+	if( (IsWiiU && ConfigGetConfig(NIN_CFG_CHEATS)) ||
+		(!IsWiiU && ConfigGetConfig(NIN_CFG_DEBUGGER|NIN_CFG_CHEATS)) )
 	{
-		if( ConfigGetConfig(NIN_CFG_CHEATS) )
-			PatchCount &= ~FPATCH_OSSleepThread;
-	}
-	else
-	{
-		if( ConfigGetConfig(NIN_CFG_DEBUGGER|NIN_CFG_CHEATS) )
-			PatchCount &= ~FPATCH_OSSleepThread;
+		PatchCount &= ~(
+			FPATCH_OSSleepThread | //Hook 1
+			//FPATCH_GXBegin //Hook 2, unstable!
+			FPATCH_GXDrawDone //Hook 3
+		);
 	}
 #endif
-	if( ConfigGetConfig(NIN_CFG_FORCE_PROG) || (ConfigGetVideoMode() & NIN_VID_FORCE) )
+	if( ConfigGetConfig(NIN_CFG_FORCE_PROG) || (ConfigGetVideoMode() & NIN_VID_FORCE) ||
+		(ConfigGetVideoOffset() != 0 && ConfigGetVideoOffset() >= -20 && ConfigGetVideoOffset() <= 20) ||
+		(ConfigGetVideoScale() != 0 && ConfigGetVideoScale() >= 40 && ConfigGetVideoScale() <= 120) )
 		PatchCount &= ~FPATCH_VideoModes;
-
+	/* Set up patch pattern lists */
+	FuncPatterns CurFPatternsList[PCODE_MAX];
+	u32 CurFPatternsListLen = 0;
+	u32 minPatternSize = 0xFFFFFFFF;
+	u32 maxPatternSize = 0;
 	u32 patitr;
 	for(patitr = 0; patitr < PCODE_MAX; ++patitr)
 	{
+		/* only handle used patterns */
+		if(AllFPatterns[patitr].patmode == PCODE_TRI && TRIGame == TRI_NONE)
+			continue;
+		if(AllFPatterns[patitr].patmode == PCODE_EXI && DisableEXIPatch)
+			continue;
+		if (AllFPatterns[patitr].patmode == PCODE_DATEL && Datel == 0)
+			continue;
+		if (AllFPatterns[patitr].patmode == PCODE_PSO && isPSO == 0)
+			continue;
+		if (AllFPatterns[patitr].patmode == PCODE_SI && DisableSIPatch)
+			continue;
+		/* clear from pervious patches */
 		FuncPattern *CurPatterns = AllFPatterns[patitr].pat;
 		u32 CurPatternsLen = AllFPatterns[patitr].patlen;
 		for( j=0; j < CurPatternsLen; ++j )
+		{
 			CurPatterns[j].Found = 0;
+			if(CurPatterns[j].Length < minPatternSize)
+				minPatternSize = CurPatterns[j].Length;
+			if(CurPatterns[j].Length > maxPatternSize)
+				maxPatternSize = CurPatterns[j].Length;
+		}
+		/* we use this pattern type */
+		CurFPatternsList[CurFPatternsListLen].pat = CurPatterns;
+		CurFPatternsList[CurFPatternsListLen].patlen = CurPatternsLen;
+		CurFPatternsListLen++;
 	}
 	/* Cheats */
-	u32 DebuggerHook = 0;
+	u32 DebuggerHook = 0, DebuggerHook2 = 0, DebuggerHook3 = 0;
 	/* SI Inited Patch */
 	u32 PADInitOffset = 0, SIInitOffset = 0;
 	/* DSP Patches */
@@ -1793,9 +1695,7 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 					u32 HwOffset = Offset;
 					if ((read32(Offset + 4) & 0xFFFF) == 0xD302)	// Loader
 						HwOffset = Offset + 4;
-					#ifdef DEBUG_PATCH
 					dbgprintf("Patch:[__DVDInterruptHandler]: 0x%08X (0x%08X)\r\n", Offset, HwOffset );
-					#endif
 					PatchBL(__DVDInterruptHandlerAddr, HwOffset);
 					PatchCount |= FPATCH_DVDIntrHandler;
 					i = GotoFuncEnd(i, (u32)Buffer);
@@ -1809,9 +1709,7 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 					u32 HwOffset = Offset;
 					if ((read32(Offset + 4) & 0xFFFF) == 0xD302)	// Loader
 						HwOffset = Offset + 4;
-					#ifdef DEBUG_PATCH
 					dbgprintf("Patch:[__DVDInterruptHandler]: 0x%08X (0x%08X)\r\n", Offset, HwOffset );
-					#endif
 					//PatchDiscInterface( (char*)Offset );
 					PatchBL(__DVDInterruptHandlerAddr, HwOffset);
 					PatchCount |= FPATCH_DVDIntrHandler;
@@ -1828,18 +1726,14 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 						HwOffset = Offset + 4;
 					else
 					{
-						#ifdef DEBUG_PATCH
 						dbgprintf("Patch:[__DVDInterruptHandler]: 0x%08X (0x%08X)\r\n", Offset, HwOffset );
-						#endif
 						// Save r0 (lr) before bl
 						u32 OrigData = read32(HwOffset);
 						write32(HwOffset, read32(HwOffset + 4));
 						write32(HwOffset + 4, OrigData);
 						HwOffset = Offset + 4;
 					}
-					#ifdef DEBUG_PATCH
 					dbgprintf("Patch:[__DVDInterruptHandler]: 0x%08X (0x%08X)\r\n", Offset, HwOffset );
-					#endif
 					//PatchDiscInterface( (char*)Offset );
 					PatchBL(__DVDInterruptHandlerAddr, HwOffset);
 					PatchCount |= FPATCH_DVDIntrHandler;
@@ -1858,6 +1752,19 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 					continue;
 				}
 			}
+			if( (PatchCount & FPATCH_getTiming) == 0 )
+			{
+				if( BufAt0 == 0x386500BE && BufAt4 == 0x4E800020 && read32((u32)Buffer+i+8) == 0x386500E4 &&
+					read32((u32)Buffer+i+12) == 0x4E800020 && read32((u32)Buffer+i+16) == 0x38600000 &&
+					read32((u32)Buffer+i+20) == 0x4E800020 )
+				{
+					printpatchfound("getTiming", NULL, (u32)Buffer + i + 16);
+					write32( (u32)Buffer + i + 16, 0x7CA32B78 ); //mr r5, r3
+					PatchCount |= FPATCH_getTiming;
+					i += 20;
+					continue;
+				}
+			}
 			if( (PatchCount & FPATCH_GXInit) == 0 )
 			{
 				if( BufAt0 == 0x3C80CC00 ) /* Release SDK */
@@ -1871,9 +1778,7 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 						else if( p1 && R16((u32)Buffer+j) == 0x90AD )
 						{
 							piReg = R16( (u32)Buffer + j + 2 );
-							#ifdef DEBUG_PATCH
 							dbgprintf("Patch:[GXInit] stw r5,-0x%X(r13) (0x%08X)\r\n", 0x10000 - piReg, (u32)Buffer + j + 2);
-							#endif
 							PatchCount |= FPATCH_GXInit;
 							i = GotoFuncEnd(j, (u32)Buffer);
 							break;
@@ -1892,9 +1797,7 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 						else if( p1 && R16((u32)Buffer+j) == 0x906D )
 						{
 							piReg = R16( (u32)Buffer + j + 2 );
-							#ifdef DEBUG_PATCH
 							dbgprintf("Patch:[GXInit DBG] stw r3,-0x%X(r13) (0x%08X)\r\n", 0x10000 - piReg, (u32)Buffer + j + 2);
-							#endif
 							PatchCount |= FPATCH_GXInit;
 							i = GotoFuncEnd(j, (u32)Buffer);
 							break;
@@ -1907,10 +1810,34 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 			{
 				if(BufAt0 == 0x38C00008 && read32((u32)Buffer+i+16) == 0x38800008 && read32((u32)Buffer+i+28) == 0x90DD0004)
 				{
-					printpatchfound("__CARDUnlock", NULL, (u32)Buffer + GotoFuncStart(i, (u32)Buffer));
+					printpatchfound("__CARDUnlock", "A", (u32)Buffer + GotoFuncStart(i, (u32)Buffer));
 					write32( (u32)Buffer+i, 0x3CC01000 ); //lis r6, 0x1000
 					write32( (u32)Buffer+i+28, 0x909D0004 ); //stw r4, 4(r29)
 					write32( (u32)Buffer+i+36, 0x90DD0008 ); //stw r6, 8(r29)
+					PatchCount |= FPATCH_CARDUnlock;
+					i = GotoFuncEnd(i, (u32)Buffer);
+					continue;
+				}
+				else if(BufAt0 == 0x38000008 && BufAt4 == 0x54A47820 && 
+					read32((u32)Buffer+i+20) == 0x901F0044 && read32((u32)Buffer+i+28) == 0x7C801A78 && 
+					read32((u32)Buffer+i+40) == 0x3B400000 && read32((u32)Buffer+i+60) == 0x38800008)
+				{
+					printpatchfound("__CARDUnlock", "IPL A", (u32)Buffer + GotoFuncStart(i, (u32)Buffer));
+					write32( (u32)Buffer+i, 0x38800008 ); //li r4, 8
+					write32( (u32)Buffer+i+4, 0x54A07820 ); //slwi r0, r5, 15
+					write32( (u32)Buffer+i+20, 0x909F0044 ); //stw r4, 0x44(r31)
+					write32( (u32)Buffer+i+28, 0x7C001A78 ); //xor r0, r0, r3
+					write32( (u32)Buffer+i+40, 0x3F401000 ); //lis r26, 0x1000
+					write32( (u32)Buffer+i+60, 0x3B400000 ); //li r26, 0
+					PatchCount |= FPATCH_CARDUnlock;
+					i = GotoFuncEnd(i, (u32)Buffer);
+					continue;
+				}
+				else if(BufAt0 == 0x38A00008 && read32((u32)Buffer+i+8) == 0x38000000 &&
+					read32((u32)Buffer+i+44) == 0x90BD0004 && read32((u32)Buffer+i+52) == 0x901D0008)
+				{
+					printpatchfound("__CARDUnlock", "IPL B", (u32)Buffer + GotoFuncStart(i, (u32)Buffer));
+					write32( (u32)Buffer+i+8, 0x3C001000 ); //lis r0, 0x1000
 					PatchCount |= FPATCH_CARDUnlock;
 					i = GotoFuncEnd(i, (u32)Buffer);
 					continue;
@@ -1933,16 +1860,71 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 					( BufAt4 == 0x3C808000 || BufAt4 == 0x808400E4 ) &&
 					( read32((u32)Buffer + i + 8 ) == 0x38000004 || read32((u32)Buffer + i + 8 ) == 0x808400E4 ) )
 				{
-					int j = 12;
-
-					while( *(vu32*)(Buffer+i+j) != 0x4E800020 )
-						j+=4;
-
-					DebuggerHook = (u32)Buffer + i + j;
-					printpatchfound("Hook:OSSleepThread",NULL, DebuggerHook);
-
 					PatchCount |= FPATCH_OSSleepThread;
 					i = GotoFuncEnd(i, (u32)Buffer);
+					if(DebuggerHook == 0) DebuggerHook = (u32)Buffer + i;
+					else if(DebuggerHook2 == 0) DebuggerHook2 = (u32)Buffer + i;
+					else if(DebuggerHook3 == 0) DebuggerHook3 = (u32)Buffer + i;
+					printpatchfound("Hook:OSSleepThread",NULL,(u32)Buffer + i);
+					continue;
+				}
+			}
+			if( (PatchCount & FPATCH_GXBegin) == 0 )
+			{
+				//GXBegin(Pattern 1)
+				if( BufAt0 == 0x3C60CC01 && BufAt4 == 0x98038000 &&
+					( read32((u32)Buffer + i + 8 ) == 0xB3E38000 || read32((u32)Buffer + i + 8 ) == 0xB3C38000 ) )
+				{
+					PatchCount |= FPATCH_GXBegin;
+					i = GotoFuncEnd(i, (u32)Buffer);
+					if(DebuggerHook == 0) DebuggerHook = (u32)Buffer + i;
+					else if(DebuggerHook2 == 0) DebuggerHook2 = (u32)Buffer + i;
+					else if(DebuggerHook3 == 0) DebuggerHook3 = (u32)Buffer + i;
+					printpatchfound("Hook:GXBegin",NULL,(u32)Buffer + i);
+					continue;
+				}
+			}
+			if( (PatchCount & FPATCH_GXDrawDone) == 0 )
+			{
+				//GXDrawDone(Pattern 1)
+				if( BufAt0 == 0x3CC0CC01 && BufAt4 == 0x3CA04500 &&
+					read32((u32)Buffer + i + 12) == 0x38050002 && read32((u32)Buffer + i + 16) == 0x90068000 )
+				{
+					i = GotoFuncEnd(i, (u32)Buffer);
+					if(DebuggerHook == 0) DebuggerHook = (u32)Buffer + i;
+					else if(DebuggerHook2 == 0) DebuggerHook2 = (u32)Buffer + i;
+					else if(DebuggerHook3 == 0) DebuggerHook3 = (u32)Buffer + i;
+					printpatchfound("Hook:GXDrawDone",NULL,(u32)Buffer + i);
+					continue;
+				} //GXDrawDone(Pattern 2)
+				else if( BufAt0 == 0x3CA0CC01 && BufAt4 == 0x3C804500 &&
+					read32((u32)Buffer + i + 12) == 0x38040002 && read32((u32)Buffer + i + 16) == 0x90058000 )
+				{
+					i = GotoFuncEnd(i, (u32)Buffer);
+					if(DebuggerHook == 0) DebuggerHook = (u32)Buffer + i;
+					else if(DebuggerHook2 == 0) DebuggerHook2 = (u32)Buffer + i;
+					else if(DebuggerHook3 == 0) DebuggerHook3 = (u32)Buffer + i;
+					printpatchfound("Hook:GXDrawDone",NULL,(u32)Buffer + i);
+					continue;
+				} //GXDrawDone(Pattern 3)
+				else if( BufAt0 == 0x3FE04500 && BufAt4 == 0x3BFF0002 &&
+					read32((u32)Buffer + i + 20) == 0x3C60CC01 && read32((u32)Buffer + i + 24) == 0x93E38000 )
+				{
+					i = GotoFuncEnd(i, (u32)Buffer);
+					if(DebuggerHook == 0) DebuggerHook = (u32)Buffer + i;
+					else if(DebuggerHook2 == 0) DebuggerHook2 = (u32)Buffer + i;
+					else if(DebuggerHook3 == 0) DebuggerHook3 = (u32)Buffer + i;
+					printpatchfound("Hook:GXDrawDone",NULL,(u32)Buffer + i);
+					continue;
+				}//GXDrawDone(Pattern 4)
+				else if( BufAt0 == 0x3C804500 && read32((u32)Buffer + i + 12) == 0x3CA0CC01 &&
+					read32((u32)Buffer + i + 28) == 0x38040002 && read32((u32)Buffer + i + 40) == 0x90058000 )
+				{
+					i = GotoFuncEnd(i, (u32)Buffer);
+					if(DebuggerHook == 0) DebuggerHook = (u32)Buffer + i;
+					else if(DebuggerHook2 == 0) DebuggerHook2 = (u32)Buffer + i;
+					else if(DebuggerHook3 == 0) DebuggerHook3 = (u32)Buffer + i;
+					printpatchfound("Hook:GXDrawDone",NULL,(u32)Buffer + i);
 					continue;
 				}
 			}
@@ -1977,11 +1959,13 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 								write32( (u32)Buffer+i+0x14, 0); //mode sf
 								break;
 							case 0x04: //PAL50
+								if(!(ConfigGetVideoMode() & NIN_VID_PATCH_PAL50))
+									break;
 								printvidpatch(VI_PAL, VI_480P, (u32)Buffer+i);
 								write32( (u32)Buffer+i, 0x02 );
 								//write32( (u32)Buffer+i, 0x06 );
+								memcpy( Buffer+i+0x04, GXIntDfAt04, sizeof(GXIntDfAt04) ); //terrible workaround I know
 								write32( (u32)Buffer+i+0x14, 0); //mode sf
-								//memcpy(Buffer+i, GXNtsc480Prog, sizeof(GXNtsc480Prog));
 								break;
 							case 0x08: //MPAL
 							case 0x14: //PAL60
@@ -1994,7 +1978,7 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 								break;
 						}
 					}
-					else
+					else if( ConfigGetVideoMode() & NIN_VID_FORCE )
 					{
 						u8 NinForceMode = ConfigGetVideoMode() & NIN_VID_FORCE_MASK;
 						switch(read32((u32)Buffer+i))
@@ -2030,7 +2014,8 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 								write32( (u32)Buffer+i+0x14, 1); //mode df
 								break;
 							case 0x04: //PAL50
-								if(NinForceMode == NIN_VID_FORCE_PAL50 || NinForceMode == NIN_VID_FORCE_PAL60)
+								if(NinForceMode == NIN_VID_FORCE_PAL50 || NinForceMode == NIN_VID_FORCE_PAL60
+										|| !(ConfigGetVideoMode() & NIN_VID_PATCH_PAL50))
 									break;
 								if(NinForceMode == NIN_VID_FORCE_MPAL)
 								{
@@ -2063,6 +2048,21 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 							default:
 								break;
 						}
+					}
+					if(ConfigGetVideoScale() >= 40 && ConfigGetVideoScale() <= 120)
+					{
+						W16((u32)Buffer+i+0xE, ConfigGetVideoScale() + 600);
+						W16((u32)Buffer+i+0xA, (720 - R16((u32)Buffer+i+0xE)) / 2);
+					}
+					if(ConfigGetVideoOffset() >= -20 && ConfigGetVideoOffset() <= 20)
+					{
+						u16 xorig = R16((u32)Buffer+i+0xA);
+						if((xorig + ConfigGetVideoOffset()) < 0)
+							W16((u32)Buffer+i+0xA, 0);
+						else if((xorig + ConfigGetVideoOffset()) > 80)
+							W16((u32)Buffer+i+0xA, 80);
+						else
+							W16((u32)Buffer+i+0xA, xorig + ConfigGetVideoOffset());
 					}
 					i += 0x3C;
 					continue;
@@ -2132,10 +2132,7 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 							dbgprintf("DSP after Patch\r\n");
 							hexdump((void*)(Buffer + i), DspMatches[l].Length);
 	#endif
-
-							#ifdef DEBUG_PATCH
 							dbgprintf("Patch:[DSP v%u] patched (0x%08X)\r\n", Known, Buffer + i );
-							#endif
 							//PatchCount |= FPATCH_DSP_ROM; // yes, games can
 							//have multiple DSPs, check out Smugglers Run
 							i += DspMatches[l].Length;
@@ -2154,36 +2151,29 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 		}
 		i+=4;
 
-		FuncPattern fp;
-		MPattern( (u8*)(Buffer+i), Length, &fp );
+		MPattern( (u8*)(Buffer+i), maxPatternSize, &curFunc );
+		/* only deal with functions with potentially correct function sizes */
+		if(curFunc.Length < minPatternSize || curFunc.Length > maxPatternSize)
+			continue;
 		//if ((((u32)Buffer + i) & 0x7FFFFFFF) == 0x00000000) //(FuncPrint)
-		//	dbgprintf("FuncPattern: 0x%X, %d, %d, %d, %d, %d\r\n", fp.Length, fp.Loads, fp.Stores, fp.FCalls, fp.Branch, fp.Moves);
-		for(patitr = 0; patitr < PCODE_MAX; ++patitr)
+		//	dbgprintf("FuncPattern: 0x%X, %d, %d, %d, %d, %d\r\n", 
+		//	curFunc.Length, curFunc.Loads, curFunc.Stores, curFunc.FCalls, curFunc.Branch, curFunc.Moves);
+		for(patitr = 0; patitr < CurFPatternsListLen; ++patitr)
 		{
-			if(AllFPatterns[patitr].patmode == PCODE_TRI && TRIGame == TRI_NONE)
-				continue;
-			if(AllFPatterns[patitr].patmode == PCODE_EXI && DisableEXIPatch)
-				continue;
-			if (AllFPatterns[patitr].patmode == PCODE_DATEL && Datel == 0)
-				continue;
-			if (AllFPatterns[patitr].patmode == PCODE_SI && DisableSIPatch)
-				continue;
-			FuncPattern *CurPatterns = AllFPatterns[patitr].pat;
-			u32 CurPatternsLen = AllFPatterns[patitr].patlen;
+			FuncPattern *CurPatterns = CurFPatternsList[patitr].pat;
+			u32 CurPatternsLen = CurFPatternsList[patitr].patlen;
 			bool patfound = false;
 			for( j=0; j < CurPatternsLen; ++j )
 			{
 				if( CurPatterns[j].Found ) //Skip already found patches
 					continue;
 
-				if( CPattern( &fp, &(CurPatterns[j]) ) )
+				if( CPattern( &curFunc, &(CurPatterns[j]) ) )
 				{
 					u32 FOffset = (u32)Buffer + i;
 
 					CurPatterns[j].Found = FOffset;
-					//#ifdef DEBUG_PATCH
 					//dbgprintf("Patch:[%s] found (0x%08X)\r\n", CurPatterns[j].Name, FOffset );
-					//#endif
 
 					switch( CurPatterns[j].PatchLength )
 					{
@@ -2222,12 +2212,17 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 						{
 							if(read32(FOffset + 0x40) == 0x801E0004)
 							{
-								PatchBL(GXLoadTlutAddr, FOffset + 0x40);
-								if(read32(FOffset + 0x6C) == 0x801E0004)
-									PatchBL(GXLoadTlutAddr, FOffset + 0x6C);
-								else if(read32(FOffset + 0x70) == 0x801E0004)
-									PatchBL(GXLoadTlutAddr, FOffset + 0x70);
-								printpatchfound(CurPatterns[j].Name, CurPatterns[j].Type, FOffset);
+								if(TITLE_ID == 0x47424F) //Burnout
+								{
+									PatchBL(GXLoadTlutAddr, FOffset + 0x40);
+									if(read32(FOffset + 0x6C) == 0x801E0004)
+										PatchBL(GXLoadTlutAddr, FOffset + 0x6C);
+									else if(read32(FOffset + 0x70) == 0x801E0004)
+										PatchBL(GXLoadTlutAddr, FOffset + 0x70);
+									printpatchfound(CurPatterns[j].Name, CurPatterns[j].Type, FOffset);
+								}
+								else
+									dbgprintf("Patch:[GXLoadTlut] skipped (0x%08X)\r\n", FOffset);
 							}
 							else
 								CurPatterns[j].Found = 0; // False hit
@@ -2243,9 +2238,7 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 								}
 								else
 								{
-									#ifdef DEBUG_PATCH
 									dbgprintf("Patch:[__ARHandler] skipped (0x%08X)\r\n", FOffset);
-									#endif
 								}
 							}
 							else
@@ -2314,8 +2307,13 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 						} break;
 						case FCODE___OSReadROM:	//	__OSReadROM
 						{
-							printpatchfound(CurPatterns[j].Name, CurPatterns[j].Type, FOffset);
-							memcpy( (void*)FOffset, __OSReadROM, sizeof(__OSReadROM) );
+							if(read32(FOffset+0x80) == 0x38A00004)
+							{
+								memcpy((void*)FOffset, ReadROM, ReadROM_size);
+								printpatchfound(CurPatterns[j].Name, CurPatterns[j].Type, FOffset);
+							}
+							else
+								CurPatterns[j].Found = 0;
 						} break;
 						case FCODE___OSInitAudioSystem_A:
 						{
@@ -2331,9 +2329,7 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 						{
 							if((GAME_ID) == 0x475A4D50) //dont know why needed
 							{
-								#ifdef DEBUG_PATCH
 								dbgprintf("Patch:[__GXSetVAT] skipped (0x%08X)\r\n", FOffset);
-								#endif
 								break;
 							}
 							u32 BaseReg = 0, L1 = 0, L2 = 0, L3 = 0, RegLoc = 0;
@@ -2405,9 +2401,7 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 										if( reg == 3 )
 										{
 											value = read32( FOffset + off ) & 0x0000FFFF;
-											#ifdef DEBUG_PATCH
 											//dbgprintf("lis:%08X value:%04X\r\n", FOffset+off, value );
-											#endif
 										}
 									}
 								}
@@ -2422,9 +2416,7 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 											if(dst == 0)
 											{
 												valueB = read32( FOffset + off ) & 0x0000FFFF;
-												#ifdef DEBUG_PATCH
 												//dbgprintf("addi:%08X value:%04X\r\n", FOffset+off, valueB);
-												#endif
 												break;
 											}
 											else //false hit
@@ -2482,7 +2474,8 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 						} break;
 						case FCODE_ReadROM:
 						{
-							if(read32(FOffset+0x3C) == 0x3BE00100)
+							if(read32(FOffset+0x3C) == 0x3BE00100 || 
+								read32(FOffset+0x44) == 0x38800100)
 							{
 								memcpy((void*)FOffset, ReadROM, ReadROM_size);
 								printpatchfound(CurPatterns[j].Name, CurPatterns[j].Type, FOffset);
@@ -2507,9 +2500,7 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 							}
 							else if(read32(FOffset + 0x24) == 0x38604000 || read32(FOffset + 0x2C) == 0x38604000)
 							{
-								#ifdef DEBUG_PATCH
 								dbgprintf("Patch:[ARInit] skipped (0x%08X)\r\n", FOffset);
-								#endif
 							}
 							else
 								CurPatterns[j].Found = 0;
@@ -2542,7 +2533,7 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 									 (TITLE_ID) == 0x474D4F ||	// Micro Machines
 									 (TITLE_ID) == 0x475355 ||	// Superman: Shadow of Apokolips
 									 (TITLE_ID) == 0x474859 ||	// Disney's The Haunted Mansion
-									 (TITLE_ID) == 0x443737 )	// Multi-Game Demo Disc 18
+									 DemoNeedsPaperMarioDMA())
 							{
 								memcpy( (void*)FOffset, ARStartDMA_PM, ARStartDMA_PM_size );
 							}
@@ -2578,9 +2569,7 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 						{
 							if( ConfigGetConfig( NIN_CFG_DEBUGGER ) || !ConfigGetConfig(NIN_CFG_OSREPORT) )
 							{
-								#ifdef DEBUG_PATCH
 								dbgprintf("Patch:[patch_fwrite_Log] skipped (0x%08X)\r\n", FOffset);
-								#endif
 								break;
 							}
 
@@ -2588,9 +2577,7 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 							{
 								if( CurPatterns[j].Patch == patch_fwrite_GC ) // patch_fwrite_Log works fine
 								{
-									#ifdef DEBUG_PATCH
 									dbgprintf("Patch:[patch_fwrite_GC] skipped (0x%08X)\r\n", FOffset);
-									#endif
 									break;
 								}
 							}
@@ -2721,6 +2708,16 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 								}
 							}
 						} break;
+						case FCODE___PADSetSamplingRate:
+						{
+							if(read32(FOffset+0x60) != 0x40800014 || read32(FOffset+0x8C) != 0xA003206C)
+							{
+								CurPatterns[j].Found = 0; // False hit
+								break;
+							}
+							write32(FOffset+0x60, 0x60000000); //anti-crash
+							printpatchfound(CurPatterns[j].Name, CurPatterns[j].Type, FOffset);
+						} break;
 						case FCODE_PADControlAllMotors:
 						{
 							u32 CheckOffset = CurPatterns[j].Length - 0x24;
@@ -2794,8 +2791,15 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 							if(useipl == 1) break;
 							if(read32(FOffset + 0xF8) == 0x2C000000)
 							{
-								PatchBL( __DSPHandlerAddr, (FOffset + 0xF8) );
-								printpatchfound(CurPatterns[j].Name, CurPatterns[j].Type, FOffset);
+								if(DSPHandlerNeeded)
+								{
+									PatchBL( __DSPHandlerAddr, (FOffset + 0xF8) );
+									printpatchfound(CurPatterns[j].Name, CurPatterns[j].Type, FOffset);
+								}
+								else
+								{
+									dbgprintf("Patch:[__DSPHandler] skipped (0x%08X)\r\n", FOffset);
+								}
 							}
 							else
 								CurPatterns[j].Found = 0;
@@ -2817,9 +2821,7 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 								dbgprintf("PSO:Extract Addr:0x%08X\r\n", NewAddr);
 								write32(PRS_EXTRACT, NewAddr);
 								sync_after_write((void*)PRS_EXTRACT, 0x20);
-#ifdef DEBUG_PATCH
 								printpatchfound("SwitcherPrs", NULL, OrigAddr);
-#endif
 								PatchBL(SwitcherPrsAddr, OrigAddr);
 							}
 						} break;
@@ -2829,9 +2831,7 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 							u32 OrigAddr = FOffset + 0xAC;
 							if ((read32(OrigAddr - 8) == 0x4C00012C) && (read32(OrigAddr) == 0x4E800021))  // isync and blrl
 							{
-#ifdef DEBUG_PATCH
 								printpatchfound("PSO", "FakeEntry", OrigAddr);
-#endif
 								PatchBL(PATCH_OFFSET_ENTRY, OrigAddr);
 							}
 							else if (read32(FOffset + 0x38) == 0x4E800421) // bctrl
@@ -2843,16 +2843,12 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 									AppLoaderSize &= 0x0000FFFF;
 								else
 									AppLoaderSize = 0;
-#ifdef DEBUG_PATCH
 								printpatchfound("Datel", "FakeEntry", FOffset + 0x38);
 								printpatchfound("Datel", "FakeEntrySize", AppLoaderSize);
-#endif
 							}
 							else if (((u32)Buffer == 0x01300000) && (read32(FOffset + 0xA0) == 0x4C00012C) && (read32(FOffset + 0xC8) == 0x4E800021))  // isync and blrl
 							{
-#ifdef DEBUG_PATCH
 								printpatchfound("Datel", "FakeEntry", FOffset + 0xC8);
-#endif
 								PatchBL(PATCH_OFFSET_ENTRY, FOffset + 0xC8);
 							}
 						} break;
@@ -2863,12 +2859,11 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 								if ((  (TITLE_ID) != 0x474D53  // Super Mario Sunshine
 									&& (TITLE_ID) != 0x474C4D  // Luigis Mansion
 									&& (TITLE_ID) != 0x475049  // Pikmin
-									&& (TITLE_ID) != 0x474C56) // Chronicles of Narnia
+									&& (TITLE_ID) != 0x474C56  // Chronicles of Narnia
+									&& !DemoNeedsPostRequest())
 									|| useipl == 1)
 								{
-									#ifdef DEBUG_PATCH
 									dbgprintf("Patch:[ARQPostRequest] skipped (0x%08X)\r\n", FOffset);
-									#endif
 									break;
 								}
 							}
@@ -2880,9 +2875,7 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 							}
 							if( (CurPatterns[j].Length >> 16) == (FCODES  >> 16) )
 							{
-								#ifdef DEBUG_PATCH
 								dbgprintf("Patch:Unhandled dead case:%08X\r\n", CurPatterns[j].Length );
-								#endif
 							}
 							else
 							{
@@ -2900,9 +2893,7 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 							{
 								if( !CurPatterns[k].Found )		// Don't overwrite the offset!
 									CurPatterns[k].Found = -1;	// Usually this holds the offset, to determinate it from a REALLY found pattern we set it -1 which still counts a logical TRUE
-								#ifdef DEBUG_PATCH
 								//dbgprintf("Setting [%s] to found!\r\n", CurPatterns[k].Name );
-								#endif
 							}
 						}
 					}
@@ -2940,126 +2931,75 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 			PatchWideMulti(MTXLightPerspectiveOffset + 0x24, 27);
 		}
 	}
-	if(DebuggerHook)
+	if(DebuggerHook || DebuggerHook2 || DebuggerHook3)
 	{
-		/* Freekstyle needs Hook into GXSetDrawDone */
-		//if((GAME_ID) == 0x47464B45)
-		//	DebuggerHook = 0x123098;
-
-		u32 DBGSize;
-
-		FIL fs;
-		if( f_open_char( &fs, "/sneek/kenobiwii.bin", FA_OPEN_EXISTING|FA_READ ) != FR_OK )
+		//copy into dedicated space
+		memcpy( (void*)0x1800, codehandler, codehandler_size );
+		//copy game id for debugger
+		memcpy( (void *)0x1800, (void*)0, 6 );
+		//set custom cheats location
+		W16(0x1CDE, 0x9300);
+		W16(0x1CE2, 0x6000);
+		W16(0x1F5A, 0x9300);
+		W16(0x1F5E, 0x6000);
+		//make sure to clear code area beforeahand
+		memset((void*)0x13006000, 0, 0x2000);
+		sync_after_write((void*)0x13006000, 0x2000);
+		//copy in gct file if requested
+		if( ConfigGetConfig( NIN_CFG_CHEATS ) && TRIGame != TRI_SB && useipl == 0 )
 		{
-			#ifdef DEBUG_PATCH
-			dbgprintf( "Patch:Could not open:\"%s\", this file is required for debugging!\r\n", "/sneek/kenobiwii.bin" );
-			#endif
-		}
-		else if(fs.fsize > (POffset - 0x1800))
-		{
-			#ifdef DEBUG_PATCH
-			dbgprintf("Patch:No More Memory for kenobiwii left!\r\n");
-			#endif
-			f_close(&fs);
-		}
-		else
-		{
-			if( fs.fsize != 0 )
+			FIL CodeFD;
+			if( Check_Cheats() == 0 && f_open_char( &CodeFD, cheatPath, FA_OPEN_EXISTING|FA_READ ) == FR_OK )
 			{
-				DBGSize = fs.fsize;
-				void *KMem = malloc(fs.fsize);
-				//Read file to memory
-				s32 ret = f_read( &fs, KMem, fs.fsize, &read );
-				if( ret != FR_OK )
+				if( CodeFD.obj.objsize > 0x2000 )
 				{
-					#ifdef DEBUG_PATCH
-					dbgprintf( "Patch:Could not read:\"%s\":%d\r\n", "/sneek/kenobiwii.bin", ret );
-					#endif
-					free( KMem );
-					f_close( &fs );
+					dbgprintf( "Patch:Cheatfile is too large, it must not be larger than 8KB!\r\n" );
 				}
 				else
 				{
-					f_close( &fs );
-					memcpy( (void*)0x1800, KMem, DBGSize );
-					free( KMem );
-					if( IsWiiU )
+					void *CMem = malloc(CodeFD.obj.objsize);
+					if( f_read( &CodeFD, CMem, CodeFD.obj.objsize, &read ) == FR_OK )
 					{
-						*(vu32*)(P2C(*(vu32*)0x1808)) = 0;
+						memcpy((void*)0x13006000, CMem, CodeFD.obj.objsize);
+						sync_after_write((void*)0x13006000, 0x2000);
+						dbgprintf("Patch:Copied %s to memory\r\n", cheatPath);
 					}
 					else
 					{
-						if( ConfigGetConfig(NIN_CFG_DEBUGWAIT) )
-							*(vu32*)(P2C(*(vu32*)0x1808)) = 1;
-						else
-							*(vu32*)(P2C(*(vu32*)0x1808)) = 0;
+						dbgprintf("Patch:Failed to read %s\r\n", cheatPath);
 					}
-
-					memcpy( (void *)0x1800, (void*)0, 6 );
-
-					PatchB( 0x18A8, DebuggerHook );
-
-					if( ConfigGetConfig( NIN_CFG_CHEATS ) && TRIGame != TRI_SB && useipl == 0 )
-					{
-						char *path = (char*)malloc( 128 );
-
-						if( ConfigGetConfig(NIN_CFG_CHEAT_PATH) )
-						{
-							_sprintf( path, "%s", ConfigGetCheatPath() );
-						} else {
-							_sprintf( path, "/games/%.6s/%.6s.gct", (char*)0x1800, (char*)0x1800 );
-						}
-
-						FIL CodeFD;
-						if( f_open_char( &CodeFD, path, FA_OPEN_EXISTING|FA_READ ) == FR_OK )
-						{
-							if( CodeFD.fsize > (POffset - (0x1800+DBGSize-8)) )
-							{
-								#ifdef DEBUG_PATCH
-								dbgprintf( "Patch:Cheatfile is too large, it must not be large than %d bytes!\r\n", (POffset - (0x1800+DBGSize-8)) );
-								#endif
-							}
-							else
-							{
-								void *CMem = malloc(CodeFD.fsize);
-								if( f_read( &CodeFD, CMem, CodeFD.fsize, &read ) == FR_OK )
-								{
-									memcpy((void*)(0x1800+DBGSize-8), CMem, CodeFD.fsize);
-									#ifdef DEBUG_PATCH
-									dbgprintf("Patch:Copied cheat file to memory\r\n");
-									#endif
-									//write32( 0x1804, 1 ); //???
-								}
-								else
-								{
-									#ifdef DEBUG_PATCH
-									dbgprintf("Patch:Failed to read cheat file:\"%s\"\r\n", path);
-									#endif
-								}
-								free( CMem );
-							}
-							f_close( &CodeFD );
-						}
-						else
-						{
-							#ifdef DEBUG_PATCH
-							dbgprintf("Patch:Failed to open/find cheat file:\"%s\"\r\n", path );
-							#endif
-						}
-						free(path);
-					}
+					free( CMem );
 				}
+				f_close( &CodeFD );
+			}
+			else
+			{
+				dbgprintf("Patch:Failed to open/find cheat file:\"%s\"\r\n", cheatPath );
 			}
 		}
+		//set if debugger is requested
+		if( IsWiiU )
+		{
+			*(vu32*)(P2C(*(vu32*)0x1808)) = 0;
+		}
+		else
+		{
+			if( ConfigGetConfig(NIN_CFG_DEBUGWAIT) )
+				*(vu32*)(P2C(*(vu32*)0x1808)) = 1;
+			else
+				*(vu32*)(P2C(*(vu32*)0x1808)) = 0;
+		}
+		//setup jump to codehandler
+		if(DebuggerHook) PatchB( 0x18A8, DebuggerHook );
+		if(DebuggerHook2) PatchB( 0x18A8, DebuggerHook2 );
+		if(DebuggerHook3) PatchB( 0x18A8, DebuggerHook3 );
 	}
 	free(hash);
 	free(SHA1i);
 
 	/*if( ((PatchCount & (1|2|4|8|2048)) != (1|2|4|8|2048)) )
 	{
-		#ifdef DEBUG_PATCH
 		dbgprintf("Patch:Could not apply all required patches!\r\n");
-		#endif
 		Shutdown();
 	}*/
 
@@ -3068,18 +3008,10 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 	//if( (PatchCount & FPATCH_DSP_ROM) == 0 )
 	//	dbgprintf("Patch:Unknown DSP ROM\r\n");
 
-	for(patitr = 0; patitr < PCODE_MAX; ++patitr)
+	for(patitr = 0; patitr < CurFPatternsListLen; ++patitr)
 	{
-		if(AllFPatterns[patitr].patmode == PCODE_TRI && TRIGame == TRI_NONE)
-			continue;
-		if(AllFPatterns[patitr].patmode == PCODE_EXI && DisableEXIPatch)
-			continue;
-		if(AllFPatterns[patitr].patmode == PCODE_DATEL && Datel == 0)
-			continue;
-		if(AllFPatterns[patitr].patmode == PCODE_SI && DisableSIPatch)
-			continue;
-		FuncPattern *CurPatterns = AllFPatterns[patitr].pat;
-		u32 CurPatternsLen = AllFPatterns[patitr].patlen;
+		FuncPattern *CurPatterns = CurFPatternsList[patitr].pat;
+		u32 CurPatternsLen = CurFPatternsList[patitr].patlen;
 		for( j=0; j < CurPatternsLen; ++j )
 		{
 			if(!CurPatterns[j].Found)
@@ -3093,6 +3025,15 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 	#endif
 	PatchState = PATCH_STATE_DONE;
 
+	//Sonic R NTSC Old Debug Prints
+	/*if(read32(0x7D49C) == 0x9421FF90 && read32(0x7D5A8) == 0x9421FF90)
+	{
+		memcpy((void*)0x7D49C, OSReportDM, sizeof(OSReportDM));
+		sync_after_write((void*)0x7D49C, sizeof(OSReportDM));
+		memcpy((void*)0x7D5A8, OSReportDM, sizeof(OSReportDM));
+		sync_after_write((void*)0x7D5A8, sizeof(OSReportDM));
+		
+	}*/
 	/*if(GAME_ID == 0x47365145) //Megaman Collection
 	{
 		memcpy((void*)0x5A110, OSReportDM, sizeof(OSReportDM));
@@ -3116,23 +3057,29 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 		if(read32(0x1341514) == 0x38600001)
 		{
 			write32(0x1341514, 0x38600000);
-			#ifdef DEBUG_PATCH
-			dbgprintf("Patch:Patched Gamecube NTSC IPL\r\n");
-			#endif
+			//fix up dsp init for cardunlock
+			write32(0x134F28C, 0x64001000); //oris r0, r0, 0x1000
+			dbgprintf("Patch:Patched Gamecube NTSC IPL v1.0\r\n");
+		}
+		else if(read32(0x13693D4) == 0x38600001)
+		{
+			write32(0x13693D4, 0x38600000);
+			dbgprintf("Patch:Patched Gamecube NTSC IPL v1.1\r\n");
+		}
+		else if(read32(0x13702A0) == 0x38600001)
+		{
+			write32(0x13702A0, 0x38600000);
+			dbgprintf("Patch:Patched Gamecube NTSC IPL v1.2\r\n");
 		}
 		else if(read32(0x136C9B4) == 0x38600001)
 		{
 			write32(0x136C9B4, 0x38600000);
-			#ifdef DEBUG_PATCH
 			dbgprintf("Patch:Patched Gamecube PAL IPL v1.0\r\n");
-			#endif
 		}
 		else if(read32(0x1373618) == 0x38600001)
 		{
 			write32(0x1373618, 0x38600000);
-			#ifdef DEBUG_PATCH
 			dbgprintf("Patch:Patched Gamecube PAL IPL v1.2\r\n");
-			#endif
 		}
 	}
 	else if( TITLE_ID == 0x474256 )	// Batman Vengeance
@@ -3140,15 +3087,11 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 		// Skip Usage of EXI Channel 2
 		if(write32A(0x0018B5DC, 0x60000000, 0x4801D6E1, 0))
 		{
-			#ifdef DEBUG_PATCH
 			dbgprintf("Patch:Patched Batman Vengeance NTSC-U\r\n");
-			#endif
 		}
 		else if(write32A(0x0015092C, 0x60000000, 0x4801D599, 0))
 		{
-			#ifdef DEBUG_PATCH
 			dbgprintf("Patch:Patched Batman Vengeance PAL\r\n");
-			#endif
 		}
 	}
 	else if( TITLE_ID == 0x474336 )	// Pokemon Colosseum
@@ -3158,23 +3101,23 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 		{
 			if(write32A(0x000B0D88, 0x38600001, 0x4801C0B1, 0))
 			{
-				#ifdef DEBUG_PATCH
 				dbgprintf("Patch:Patched Pokemon Colosseum NTSC-J\r\n");
-				#endif
 			}
 			else if(write32A(0x000B30DC, 0x38600001, 0x4801C2ED, 0))
 			{
-				#ifdef DEBUG_PATCH
 				dbgprintf("Patch:Patched Pokemon Colosseum NTSC-U\r\n");
-				#endif
 			}
 			else if(write32A(0x000B66DC, 0x38600001, 0x4801C2ED, 0))
 			{
-				#ifdef DEBUG_PATCH
 				dbgprintf("Patch:Patched Pokemon Colosseum PAL\r\n");
-				#endif
 			}
 		}
+	}
+	else if( GAME_ID == 0x5043534A ) // Colosseum Bonus
+	{
+		// Memory Card inserted hack
+		if( DisableEXIPatch == 0 && write32A(0x000B0474, 0x38600001, 0x4801C0B5, 0) )
+			dbgprintf("Patch:Patched Pokemon Colosseum Bonus NTSC-J\r\n");
 	}
 	else if( TITLE_ID == 0x475A4C )	// GZL=Wind Waker
 	{
@@ -3185,36 +3128,28 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 			//	write32( 0x03945B0, 0x8039408C );	// Test menu
 			write32(0x00221A28, 0x48000034);
 			write32(0x00256424, 0x48000068);
-			#ifdef DEBUG_PATCH
 			dbgprintf("Patch:Patched WW NTSC-U\r\n");
-			#endif
 		}
 		/* NTSC-U Demo */
 		if(read32(0x0021D33C) == 0x40820034 && read32(0x00251EF8) == 0x41820068)
 		{
 			write32(0x0021D33C, 0x48000034);
 			write32(0x00251EF8, 0x48000068);
-			#ifdef DEBUG_PATCH
 			dbgprintf("Patch:Patched WW NTSC-U Demo\r\n");
-			#endif
 		}
 		/* PAL Final */
 		if(read32(0x001F1FE0) == 0x40820034 && read32(0x0025B5C4) == 0x41820068)
 		{
 			write32(0x001F1FE0, 0x48000034);
 			write32(0x0025B5C4, 0x48000068);
-			#ifdef DEBUG_PATCH
 			dbgprintf("Patch:Patched WW PAL\r\n");
-			#endif
 		}
 		/* NTSC-J Final */
 		if(read32(0x0021EDD4) == 0x40820034 && read32(0x00253BCC) == 0x41820068)
 		{
 			write32(0x0021EDD4, 0x48000034);
 			write32(0x00253BCC, 0x48000068);
-			#ifdef DEBUG_PATCH
 			dbgprintf("Patch:Patched WW NTSC-J\r\n");
-			#endif
 		}
 		/*if( ConfigGetConfig( NIN_CFG_OSREPORT ) )
 		{
@@ -3227,14 +3162,108 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 		//Fix a Bad Jump in the code
 		if(write32A(0x0018A764, 0x4182021C, 0x41820018, 0))
 		{
-			#ifdef DEBUG_PATCH
 			dbgprintf("Patch:Patched X-Men Legends 2 NTSC-U\r\n");
-			#endif
+		}
+	}
+	else if( TITLE_ID == 0x474159 ) // Midway Arcarde Treasures 2
+	{
+		//Skip over __AXOutInit calling AIStartDMA
+		if(MAT2patched == 0 && write32A(0x906D0, 0x60000000, 0x4BFFB6D9, 0))
+		{
+			//needs patch on first bootup, no idea why
+			MAT2patched = 1;
+			//UnkReport
+			//PatchB(0x7C964,0x92F50);
+			//call AIStartDMA after NGC_SoundInit
+			PatchB(0x8BDA8,0x4F1B8);
+			dbgprintf("Patch:Patched Midway Arcade Treasures 2 NTSC-U\r\n");
+		}
+	}
+	else if( TITLE_ID == 0x475051 ) // Powerpuff Girls
+	{
+		// Audio Stream force DMA to get Video Sound
+		if(read32(0xF33D8) == 0x4E800020 && read32(0xF3494) == 0x4E800020)
+		{
+			//UnkReport
+			//memcpy((void*)0xDF870, OSReportDM, sizeof(OSReportDM));
+			//sync_after_write((void*)0xDF870, sizeof(OSReportDM));
+			//OSReport
+			//memcpy((void*)0xE84D4, OSReportDM, sizeof(OSReportDM));
+			//sync_after_write((void*)0xE84D4, sizeof(OSReportDM));
+			//Call AXInit after DVDPrepareStreamAbsAsync
+			PatchB(0xF9E80, 0xF33D8);
+			//Call AXQuit after DVDCancelStreamAsync
+			PatchB(0xF9EB4, 0xF3494);
+			dbgprintf("Patch:Patched Powerpuff Girls NTSC-U\r\n");
+		}
+		else if(read32(0xF3EC0) == 0x4E800020 && read32(0xF3F7C) == 0x4E800020)
+		{
+			//Call AXInit after DVDPrepareStreamAbsAsync
+			PatchB(0xFB340, 0xF3EC0);
+			//Call AXQuit after DVDCancelStreamAsync
+			PatchB(0xFB3B0, 0xF3F7C);
+			dbgprintf("Patch:Patched Powerpuff Girls PAL\r\n");
+		}
+	}
+	else if( TITLE_ID == 0x47505A ) // Nintendo Puzzle Collection
+	{
+		if(read32(0x6A28) == 0x7C7F282E && read32(0x6AF8) == 0x7C1F002E)
+		{
+			//Dont load compressed game .rel files but the uncompressed 
+			//ones to patch the timers without any further hooks
+			write32(0x6A28, 0x38600000);
+			write32(0x6AF8, 0x38000000);
+			dbgprintf("Patch:Patched Nintendo Puzzle Collection NTSC-J\r\n");
+		}
+	}
+	else if( TITLE_ID == 0x47454F ) // Capcom vs. SNK 2 EO
+	{
+		//fix for force progressive
+		if(write32A(0x1137C, 0x60000000, 0xB0010010, 0))
+		{
+			dbgprintf("Patch:Patched Capcom vs. SNK 2 EO NTSC-U\r\n");
+		}
+	}
+	else if( TITLE_ID == 0x475038 ) // Pac-Man World 3
+	{
+		//fix for force progressive
+		if(write32A(0x28D2A8, 0x48000010, 0x41820010, 0))
+		{
+			dbgprintf("Patch:Patched Pac-Man World 3 NTSC-U\r\n");
+		}
+	}
+	else if( TITLE_ID == 0x475134 ) // SpongeBob SquarePants CFTKK
+	{
+		//fix for force progressive
+		if(write32A(0x23007C, 0x48000010, 0x41820010, 0))
+		{
+			dbgprintf("Patch:Patched SpongeBob SquarePants CFTKK NTSC-U\r\n");
+		}
+	}
+	else if( TITLE_ID == 0x47414C ) // Super Smash Bros Melee
+	{
+		//fix for video mode breaking
+		if(write32A(0x365DB0, 0x38A00280, 0xA0A7000E, 0))
+		{
+			dbgprintf("Patch:Patched Super Smash Bros Melee v1.00\r\n");
+		}
+		else if(write32A(0x366F84, 0x38A00280, 0xA0A7000E, 0))
+		{
+			dbgprintf("Patch:Patched Super Smash Bros Melee v1.01\r\n");
+		}
+		else if(write32A(0x367C64, 0x38A00280, 0xA0A7000E, 0))
+		{
+			dbgprintf("Patch:Patched Super Smash Bros Melee v1.02\r\n");
 		}
 	}
 	PatchStaticTimers();
 
 	sync_after_write( Buffer, Length );
+
+	UseReadLimit = 1;
+	if(RealDiscCMD != 0 || TRIGame != TRI_NONE || IsN64Emu 
+			|| ConfigGetConfig(NIN_CFG_REMLIMIT))
+		UseReadLimit = 0;
 }
 
 void PatchInit()
@@ -3293,19 +3322,14 @@ void PatchGame()
 	// Reset SI status
 	SIInit();
 	u32 SiInitSet = 0;
-	//Reset GCAM status
-	GCAMInit();
-	//F-Zero AX uses Clean CARD after 150 uses
-	if(TRIGame == TRI_AX && TRI_BackupAvailable == 1)
-	{
-		sync_before_read(OurBase, 0x20);
-		GCAMCARDCleanStatus(R16((u32)OurBase+0x16));
-	}
+	// Reset Triforce
+	TRIReset();
 	// Didn't look for why PMW2 requires this.  ToDo
 	if ((TITLE_ID) == 0x475032 || TRIGame) // PacMan World 2 and Triforce hack
 		SiInitSet = 1;
 	write32(0x13002740, SiInitSet); //Clear SI Inited == 0
 	write32(0x13002744, PADSwitchRequired() && (useipl == 0));
+	write32(0x13002748, PADForceConnected() && (useipl == 0));
 	sync_after_write((void*)0x13002740, 0x20);
 	/* Clear very actively used areas */
 	memset32((void*)0x13026500, 0, 0x100);
@@ -3332,60 +3356,42 @@ void PatchGame()
 s32 Check_Cheats()
 {
 #ifdef CHEATS
-	if((ConfigGetConfig(NIN_CFG_CHEATS)) ||
-	  ((!(IsWiiU)) && ConfigGetConfig(NIN_CFG_DEBUGGER) ))
+	if( ConfigGetConfig(NIN_CFG_CHEAT_PATH) )
 	{
-		u32 DBGSize;
-		FIL fs;
-		
-		if( f_open_char( &fs, "/sneek/kenobiwii.bin", FA_OPEN_EXISTING|FA_READ ) != FR_OK )
+		char *cpath = ConfigGetCheatPath();
+		if (cpath[0] != 0)
 		{
-			#ifdef DEBUG_PATCH
-			dbgprintf( "Patch:Could not open:\"%s\", this file is required for debugging!\r\n", "/sneek/kenobiwii.bin" );
-			#endif
-			return -1;
-		}
-		DBGSize = fs.fsize;
-		f_close( &fs );
-		
-		if( ConfigGetConfig( NIN_CFG_CHEATS ) )
-		{
-			char path[128];
-
-			if( ConfigGetConfig(NIN_CFG_CHEAT_PATH) )
+			if( fileExist(cpath) )
 			{
-				_sprintf( path, "%s", ConfigGetCheatPath() );
-				if (path[0] == 0)	//cheat path is null
-					return -4;
-			} else {
-				return 0;	//todo: temp until fixed
-//				_sprintf( path, "/games/%.6s/%.6s.gct", (char*)0x1800, (char*)0x1800 );
-//				_sprintf( path, "/games/%c%c%c%c%c%c/%c%c%c%c%c%c.gct", (char*)0, (char*)1, (char*)2, (char*)3, (char*)4, (char*)5, (char*)0, (char*)1, (char*)2, (char*)3, (char*)4, (char*)5 );
-			}
-
-			FIL CodeFD;
-
-			if( f_open_char( &CodeFD, path, FA_OPEN_EXISTING|FA_READ ) == FR_OK )
-			{
-				if( CodeFD.fsize >= 0x2E60 - (0x1800+DBGSize-8) )
-				{
-					f_close( &CodeFD );
-					#ifdef DEBUG_PATCH
-					dbgprintf("Patch:Cheatfile is too large, it must not be large than %d bytes!\r\n", 0x2E60 - (0x1800+DBGSize-8));
-					#endif
-					return -3;
-				}
-				f_close( &CodeFD );
-			}
-			else
-			{
-				#ifdef DEBUG_PATCH
-				dbgprintf("Patch:Failed to read cheat file:\"%s\"\r\n", path );
-				#endif
-				return -2;
+				memcpy(cheatPath, cpath, 255);
+				return 0;
 			}
 		}
 	}
+	u32 i;
+	char* DiscName = ConfigGetGamePath();
+	//search the string backwards for '/'
+	for( i=strlen(DiscName); i > 0; --i )
+		if( DiscName[i] == '/' )
+			break;
+	i++;
+	memcpy(cheatPath, DiscName, i);
+	//new version paths
+	_sprintf(cheatPath+i, "game.gct");
+	if( fileExist(cheatPath) )
+		return 0;
+	sync_before_read((void*)0x0, 0x20);
+	_sprintf(cheatPath+i, "%.6s.gct", (char*)0x0);
+	if( fileExist(cheatPath) )
+		return 0;
+	//gecko path
+	_sprintf(cheatPath, "/codes/%.6s.gct", (char*)0x0);
+	if( fileExist(cheatPath) )
+		return 0;
+	//oldschool backup path
+	_sprintf(cheatPath, "/games/%.6s/%.6s.gct", (char*)0x0, (char*)0x0);
+	if( fileExist(cheatPath) )
+		return 0;
 #endif
-	return 0;
+	return -1;
 }

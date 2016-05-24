@@ -16,15 +16,15 @@ You should have received a copy of the GNU General Public License
 along with this program; if not, write to the Free Software
 Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
-#include "global.h"
+#include "Config.h"
 #include "ReadSpeed.h"
 #include "debug.h"
 
 // This file exists to emulate the disc read speed
 // The data used comes from my D2C wii disc drive
 
-static const u32 SEEK_TICKS = 9492; // 50 ms
-static const float READ_TICKS = 1.657f; // 3 MB/s
+static u32 SEEK_TICKS = 94922; // 50 ms
+static float READ_TICKS = 1.657f; // 3 MB/s
 static const u32 READ_BLOCK = 65536; // 64 KB
 static const float CACHE_TICKS = 8.627f; // 15.6 MB/s
 static const u32 CACHE_SIZE = 1048576; // 1 MB
@@ -36,20 +36,32 @@ static u32 CMDTicks = UINT_MAX;
 static u32 CMDBaseBlock = UINT_MAX;
 static u32 CMDLastBlock = UINT_MAX;
 
+extern u32 TITLE_ID;
+
 void ReadSpeed_Init()
 {
+	if(ConfigGetConfig(NIN_CFG_REMLIMIT))
+		dbgprintf("ReadSpeed:Disabled\r\n");
 	CMDStartTime = 0;
 	CMDLastFinish = 0;
 	CMDTicks = UINT_MAX;
 	CMDBaseBlock = UINT_MAX;
 	CMDLastBlock = UINT_MAX;
+
+	if(TITLE_ID == 0x47574B) //King Kong
+	{
+		dbgprintf("ReadSpeed:Using Slow Settings\r\n");
+		SEEK_TICKS = 284765; // 150 ms
+		READ_TICKS = 1.1f; // 2 MB/s
+	}
 }
 
+u32 UseReadLimit = 1;
 extern vu32 TRIGame;
 extern u32 RealDiscCMD;
 void ReadSpeed_Start()
 {
-	if(RealDiscCMD != 0 || TRIGame != TRI_NONE)
+	if(UseReadLimit == 0)
 		return;
 
 	CMDStartTime = read32(HW_TIMER);
@@ -57,7 +69,7 @@ void ReadSpeed_Start()
 
 void ReadSpeed_Setup(u32 Offset, int Length)
 {
-	if(RealDiscCMD != 0 || TRIGame != TRI_NONE)
+	if(UseReadLimit == 0)
 		return;
 
 	u32 CurrentBlock = ALIGN_BACKWARD(Offset, READ_BLOCK);
@@ -97,7 +109,7 @@ void ReadSpeed_Setup(u32 Offset, int Length)
 
 u32 ReadSpeed_End()
 {
-	if(RealDiscCMD != 0 || TRIGame != TRI_NONE)
+	if(UseReadLimit == 0)
 		return 1;
 
 	if(CMDTicks < UINT_MAX)

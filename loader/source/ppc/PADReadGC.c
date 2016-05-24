@@ -5,8 +5,9 @@
 #define PAD_CHAN0_BIT				0x80000000
 
 static u32 stubsize = 0x1800;
-static vu32 *stubdest = (u32*)0x81330000;
+static vu32 *stubdest = (u32*)0x80004000;
 static vu32 *stubsrc = (u32*)0x93011810;
+static vu16* const _memReg = (u16*)0xCC004000;
 static vu16* const _dspReg = (u16*)0xCC005000;
 static vu32* const _siReg = (u32*)0xCD006400;
 static vu32* const MotorCommand = (u32*)0x93003010;
@@ -14,7 +15,6 @@ static vu32* RESET_STATUS = (u32*)0xD3003420;
 static vu32* HID_STATUS = (u32*)0xD3003440;
 static vu32* HIDMotor = (u32*)0x93002700;
 static vu32* PadUsed = (u32*)0x93002704;
-static vu32* TRIButtons = (u32*)0x93002708;
 
 static vu32* PADIsBarrel = (u32*)0xD3002830;
 static vu32* PADBarrelEnabled = (u32*)0xD3002840;
@@ -25,7 +25,7 @@ static vu32* BTMotor = (u32*)0x93002720;
 static vu32* BTPadFree = (u32*)0x93002730;
 static vu32* SIInited = (u32*)0x93002740;
 static vu32* PADSwitchRequired = (u32*)0x93002744;
-
+static vu32* PADForceConnected = (u32*)0x93002748;
 
 static u32 PrevAdapterChannel1 = 0;
 static u32 PrevAdapterChannel2 = 0;
@@ -50,6 +50,7 @@ const s8 DEADZONE = 0x1A;
 #define MAP_BUTTON(PAD,WM) ( button |= ( BTPad[chan].button & WM ) ? PAD : 0 )
 #define MAP_TRIGGER_R(WM,VAL) ( button |= ( Pad[chan].triggerRight & WM ) ? VAL : 0 )
 #define MAP_TRIGGER_L(WM,VAL) ( button |= ( Pad[chan].triggerLeft  & WM ) ? VAL : 0 )
+#define ALIGN32(x) 	(((u32)x) & (~31))
 
 u32 _start(u32 calledByGame)
 {
@@ -189,11 +190,19 @@ u32 _start(u32 calledByGame)
 		_siReg[14] |= (1<<31);
 		while(_siReg[14] & (1<<31));
 	}
-
+	u32 HIDMemPrep = 0;
 	if (HIDPad == HID_PAD_NOT_SET)
 		HIDPad = MaxPads;
-	for (chan = HIDPad; (chan < HID_PAD_NONE); chan = (HID_CTRL->MultiIn == 3)? ++chan : HID_PAD_NONE) // Run once unless MultiIn == 3
+
+	for (chan = HIDPad; (chan < HID_PAD_NONE); (HID_CTRL->MultiIn == 3) ? (++chan) : (chan = HID_PAD_NONE)) // Run once unless MultiIn == 3
 	{
+		if(HIDMemPrep == 0) // first run
+		{
+			HID_Packet = (u8*)0x930050F0; // reset back to default offset
+			memInvalidate = (u32)HID_Packet; // prepare memory
+			asm volatile("dcbi 0,%0; sync" : : "b"(memInvalidate) : "memory");
+			HIDMemPrep = memInvalidate;
+		}
 		if (HID_CTRL->MultiIn == 2)		//multiple controllers connected to a single usb port
 		{
 			used |= (1<<(PrevAdapterChannel1 + chan)) | (1<<(PrevAdapterChannel2 + chan)) | (1<<(PrevAdapterChannel3 + chan))| (1<<(PrevAdapterChannel4 + chan));	//depending on adapter it may only send every 4th time
@@ -207,15 +216,16 @@ u32 _start(u32 calledByGame)
 		}
 
 		if (HID_CTRL->MultiIn == 3)		//multiple controllers connected to a single usb port all in one message
-			HID_Packet = (u8*)0x930050F0;	//reset back to default offset
-
-		memInvalidate = (u32)HID_Packet;
-		asm volatile("dcbi 0,%0; sync" : : "b"(memInvalidate) : "memory");
-
-		if (HID_CTRL->MultiIn == 3)		//multiple controllers connected to a single usb port all in one message
 		{
 			HID_Packet = (u8*)(0x930050F0 + (chan * HID_CTRL->MultiInValue));	//skip forward how ever many bytes in each controller
-			if ((HID_CTRL->VID == 0x057E) && (HID_CTRL->PID == 0x0337))	//Nintendo wiiu Gamecube Adapter
+			u32 HID_CacheEndBlock = ALIGN32(((u32)HID_Packet) + HID_CTRL->MultiInValue); //calculate upper cache block used
+			if(HID_CacheEndBlock > HIDMemPrep) //new cache block, prepare memory
+			{
+				memInvalidate = HID_CacheEndBlock;
+				asm volatile("dcbi 0,%0; sync" : : "b"(memInvalidate) : "memory");
+				HIDMemPrep = memInvalidate;
+			}
+			if ((HID_CTRL->VID == 0x057E) && (HID_CTRL->PID == 0x0337))	//Nintendo WiiU Gamecube Adapter
 			{
 				// 0x04=port powered 0x10=normal controller 0x22=wavebird communicating
 				if (((HID_Packet[1] & 0x10) == 0)	//normal controller not connected
@@ -1160,6 +1170,13 @@ u32 _start(u32 calledByGame)
 	memInvalidate = (u32)SIInited;
 	asm volatile("dcbi 0,%0; sync" : : "b"(memInvalidate) : "memory");
 
+	/* Some games always need the controllers "used" */
+	if(*PADForceConnected)
+	{
+		for(chan = 0; chan < 4; ++chan)
+			used |= (1<<chan);
+	}
+
 	if(*PADSwitchRequired)
 	{
 		*(vu32*)0xD3026438 = (*(vu32*)0xD3026438 == 0) ? 0x20202020 : 0; //switch between new data and no data
@@ -1183,26 +1200,27 @@ u32 _start(u32 calledByGame)
 	return Rumble;
 
 Shutdown:
+	/* disable interrupts */
+	asm volatile("mfmsr 3 ; rlwinm 3,3,0,17,15 ; mtmsr 3");
 	/* stop audio dma */
 	_dspReg[27] = (_dspReg[27]&~0x8000);
+	/* disable dcache and icache */
+	asm volatile("sync ; isync ; mfspr 3,1008 ; rlwinm 3,3,0,18,15 ; mtspr 1008,3");
+	/* disable memory protection */
+	_memReg[15] = 0xF;
+	_memReg[16] = 0;
+	_memReg[8] = 0xFF;
 	/* reset status 1 */
 	*RESET_STATUS = 0x1DEA;
 	while(*RESET_STATUS == 0x1DEA) ;
 	/* load in stub */
-	memFlush = (u32)stubdest;
-	u32 end = memFlush + stubsize;
-	for ( ; memFlush < end; memFlush += 32)
-	{
-		memInvalidate = (u32)stubsrc;
-		asm volatile("dcbi 0,%0 ; sync" : : "b"(memInvalidate) : "memory");
-		u8 b;
-		for(b = 0; b < 8; ++b)
-			*stubdest++ = *stubsrc++;
-		asm volatile("dcbst 0,%0; sync ; icbi 0,%0" : : "b"(memFlush));
-	}
+	do {
+		*stubdest++ = *stubsrc++;
+	} while((stubsize-=4) > 0);
+	/* jump to it */
 	asm volatile(
-		"isync\n"
-		"lis %r3, 0x8133\n"
+		"lis %r3, 0x8000\n"
+		"ori %r3, %r3, 0x4000\n"
 		"mtlr %r3\n"
 		"blr\n"
 	);

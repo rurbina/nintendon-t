@@ -1,3 +1,12 @@
+/*-----------------------------------------------------------------------*/
+/* Low level disk I/O module skeleton for FatFs     (C)ChaN, 2016        */
+/*-----------------------------------------------------------------------*/
+/* If a working storage control module is available, it should be        */
+/* attached to the FatFs via a glue function rather than modifying it.   */
+/* This is an example of glue functions to attach various exsisting      */
+/* storage control modules to the FatFs module with a defined API.       */
+/*-----------------------------------------------------------------------*/
+
 #include "diskio.h"
 #include "string.h"
 #include "debug.h"
@@ -8,15 +17,52 @@
 #include "alloc.h"
 #include "common.h"
 
-u32 s_size;
-u32 s_cnt;
+extern bool access_led;
+u32 s_size;	// Sector size.
+u32 s_cnt;	// Sector count.
 
-DRESULT disk_read_sd( BYTE drv, BYTE *buff, DWORD sector, BYTE count )
+
+/*-----------------------------------------------------------------------*/
+/* Get Drive Status                                                      */
+/*-----------------------------------------------------------------------*/
+DSTATUS disk_status (
+	BYTE pdrv		/* Physical drive nmuber to identify the drive */
+)
+{
+	return RES_OK;
+}
+
+
+
+/*-----------------------------------------------------------------------*/
+/* Inidialize a Drive                                                    */
+/*-----------------------------------------------------------------------*/
+
+DSTATUS disk_initialize (
+	BYTE pdrv				/* Physical drive nmuber to identify the drive */
+)
+{
+	/* Nintendont initializes devices outside of FatFS. */
+	return RES_OK;
+}
+
+
+
+/*-----------------------------------------------------------------------*/
+/* Read Sector(s) [SD card]                                              */
+/*-----------------------------------------------------------------------*/
+
+DRESULT disk_read_sd (
+	BYTE pdrv,		/* Physical drive nmuber to identify the drive */
+	BYTE *buff,		/* Data buffer to store read data */
+	DWORD sector,	/* Sector address in LBA */
+	UINT count		/* Number of sectors to read */
+)
 {
 	s32 Retry=10;
 
-	if (ConfigGetConfig(NIN_CFG_LED))
-		set32(HW_GPIO_OUT, GPIO_SLOT_LED);	//turn on drive light
+	//turn on drive led
+	if (access_led) set32(HW_GPIO_OUT, GPIO_SLOT_LED);
 
 	while(1)
 	{
@@ -26,67 +72,118 @@ DRESULT disk_read_sd( BYTE drv, BYTE *buff, DWORD sector, BYTE count )
 		Retry--;
 		if( Retry < 0 )
 		{
-			if (ConfigGetConfig(NIN_CFG_LED))
-				clear32(HW_GPIO_OUT, GPIO_SLOT_LED); //turn off drive light
+			//turn off drive led
+			if (access_led) clear32(HW_GPIO_OUT, GPIO_SLOT_LED);
 			return RES_ERROR;
 		}
 	}
 
-	if (ConfigGetConfig(NIN_CFG_LED))
-		clear32(HW_GPIO_OUT, GPIO_SLOT_LED); //turn off drive light
+	//turn off drive led
+	if (access_led) clear32(HW_GPIO_OUT, GPIO_SLOT_LED);
 
 	return RES_OK;
 }
-// Write Sector(s)
-DRESULT disk_write_sd( BYTE drv, const BYTE *buff, DWORD sector, BYTE count )
+
+
+
+/*-----------------------------------------------------------------------*/
+/* Write Sector(s) [SD card]                                             */
+/*-----------------------------------------------------------------------*/
+
+DRESULT disk_write_sd (
+	BYTE pdrv,			/* Physical drive nmuber to identify the drive */
+	const BYTE *buff,	/* Data to be written */
+	DWORD sector,		/* Sector address in LBA */
+	UINT count			/* Number of sectors to write */
+)
 {
+	//turn on drive led
+	if (access_led) set32(HW_GPIO_OUT, GPIO_SLOT_LED);
+
 	if( sdio_WriteSectors( sector, count, buff ) < 0 )
+	{
+		//turn off drive led
+		if (access_led) clear32(HW_GPIO_OUT, GPIO_SLOT_LED);
 		return RES_ERROR;
+	}
+
+	//turn off drive led
+	if (access_led) clear32(HW_GPIO_OUT, GPIO_SLOT_LED);
 
 	return RES_OK;
 }
 
-DRESULT disk_read_usb(BYTE drv, BYTE *buff, DWORD sector, BYTE count)
+
+
+/*-----------------------------------------------------------------------*/
+/* Read Sector(s) [USB storage]                                          */
+/*-----------------------------------------------------------------------*/
+
+DRESULT disk_read_usb (
+	BYTE pdrv,		/* Physical drive nmuber to identify the drive */
+	BYTE *buff,		/* Data buffer to store read data */
+	DWORD sector,	/* Sector address in LBA */
+	UINT count		/* Number of sectors to read */
+)
 {
-	if (ConfigGetConfig(NIN_CFG_LED))
-		set32(HW_GPIO_OUT, GPIO_SLOT_LED);	//turn on drive light
+	//turn on drive led
+	if (access_led) set32(HW_GPIO_OUT, GPIO_SLOT_LED);
 
 	if(USBStorage_ReadSectors(sector, count, buff) != 1)
 	{
-		if (ConfigGetConfig(NIN_CFG_LED))
-			clear32(HW_GPIO_OUT, GPIO_SLOT_LED); //turn off drive light
+		//turn off drive led
+		if (access_led) clear32(HW_GPIO_OUT, GPIO_SLOT_LED);
 		dbgprintf("USB:Failed to read from USB device... Sector: %d Count: %d dst: %p\r\n", sector, count, buff);
 		return RES_ERROR;
 	}
 
-	if (ConfigGetConfig(NIN_CFG_LED))
-		clear32(HW_GPIO_OUT, GPIO_SLOT_LED); //turn off drive light
+	//turn off drive led
+	if (access_led) clear32(HW_GPIO_OUT, GPIO_SLOT_LED);
 
 	return RES_OK;
 }
 
-DRESULT disk_write_usb(BYTE drv, const BYTE *buff, DWORD sector, BYTE count)
+
+
+/*-----------------------------------------------------------------------*/
+/* Write Sector(s) [USB storage]                                         */
+/*-----------------------------------------------------------------------*/
+
+DRESULT disk_write_usb (
+	BYTE pdrv,			/* Physical drive nmuber to identify the drive */
+	const BYTE *buff,	/* Data to be written */
+	DWORD sector,		/* Sector address in LBA */
+	UINT count			/* Number of sectors to write */
+)
 {
+	//turn on drive led
+	if (access_led) set32(HW_GPIO_OUT, GPIO_SLOT_LED);
+
 	if(USBStorage_WriteSectors(sector, count, buff) != 1)
 	{
+		//turn off drive led
+		if (access_led) clear32(HW_GPIO_OUT, GPIO_SLOT_LED);
+
 		dbgprintf("USB: Failed to write to USB device... Sector: %d Count: %d dst: %p\r\n", sector, count, buff);
 		return RES_ERROR;
 	}
 
+	//turn off drive led
+	if (access_led) clear32(HW_GPIO_OUT, GPIO_SLOT_LED);
+
 	return RES_OK;
 }
 
-DSTATUS disk_initialize( BYTE drv )
-{
-	return RES_OK;
-}
 
-DSTATUS disk_status( BYTE drv )
-{
-	return RES_OK;
-}
+/*-----------------------------------------------------------------------*/
+/* Miscellaneous Functions                                               */
+/*-----------------------------------------------------------------------*/
 
-DRESULT disk_ioctl (BYTE pdrv, BYTE cmd, void* buff)
+DRESULT disk_ioctl (
+	BYTE pdrv,		/* Physical drive nmuber (0..) */
+	BYTE cmd,		/* Control code */
+	void *buff		/* Buffer to send/receive control data */
+)
 {
 	if(cmd == GET_SECTOR_SIZE)
 		*(WORD*)buff = s_size;
@@ -94,8 +191,12 @@ DRESULT disk_ioctl (BYTE pdrv, BYTE cmd, void* buff)
 	return RES_OK;
 }
 
+
+
+// Get the current system time as a FAT timestamp.
 DWORD get_fattime(void)
 {
+	// TODO: Implement this for Nintendont.
 	//rtc_time tm;
 	//DWORD ret;
 
@@ -108,9 +209,15 @@ DWORD get_fattime(void)
 	//	| ((DWORD)tm.tm_min << 5)
 	//	| ((DWORD)tm.tm_sec >> 1);
 	//return ret;
-	
+
 	return 0;
 }
+
+
+
+/*-----------------------------------------------------------------------*/
+/* Nintendont: Device type selection.                                    */
+/*-----------------------------------------------------------------------*/
 
 DiskReadFunc disk_read;
 DiskWriteFunc disk_write;

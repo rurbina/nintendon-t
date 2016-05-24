@@ -72,80 +72,38 @@ int  GRRLIB_Init (void) {
 	if (is_setup)  return 0;
 	
 	VIDEO_Init();
-	
-	// Grab a pointer to the video mode attributes
-	if ( !(rmode = VIDEO_GetPreferredMode(NULL)) )  return -1;
-	#ifdef DEBUG
-	if( !IsWiiU() )
-	{
-		if( rmode == &TVNtsc480Int )
-			gprintf("VI:TVNtsc480Int\r\n");
-		else if( rmode == &TVNtsc480IntDf )
-			gprintf("VI:TVNtsc480IntDf\r\n");
-		else if( rmode == &TVNtsc480IntAa )
-			gprintf("VI:TVNtsc480IntAa\r\n");
-		else if( rmode == &TVNtsc480Prog )
-			gprintf("VI:TVNtsc480Prog\r\n");
-		else if( rmode == &TVNtsc480ProgSoft )
-			gprintf("VI:TVNtsc480ProgSoft\r\n");
-		else if( rmode == &TVNtsc480ProgAa )
-			gprintf("VI:TVNtsc480ProgAa\r\n");
 
-		else if( rmode == &TVPal524IntAa )
-			gprintf("VI:TVPal524IntAa\r\n");
-		else if( rmode == &TVPal528Int )
-			gprintf("VI:TVPal528Int\r\n");
-		else if( rmode == &TVPal528IntDf )
-			gprintf("VI:TVPal528IntDf\r\n");
-		else if( rmode == &TVPal528IntDf )
-			gprintf("VI:TVPal528IntDf\r\n");
-		else if( rmode == &TVPal528IntDf )
-			gprintf("VI:TVPal528IntDf\r\n");
-	
-		else if( rmode == &TVEurgb60Hz480Int )
-			gprintf("VI:TVEurgb60Hz480Int\r\n");
-		else if( rmode == &TVEurgb60Hz480IntDf )
-			gprintf("VI:TVEurgb60Hz480IntDf\r\n");
-		else if( rmode == &TVEurgb60Hz480IntAa )
-			gprintf("VI:TVEurgb60Hz480IntAa\r\n");
-		else if( rmode == &TVEurgb60Hz480Prog )
-			gprintf("VI:TVEurgb60Hz480Prog\r\n");
-		else if( rmode == &TVEurgb60Hz480ProgSoft )
-			gprintf("VI:TVEurgb60Hz480ProgSoft\r\n");
-		else if( rmode == &TVEurgb60Hz480ProgAa )
-			gprintf("VI:TVEurgb60Hz480ProgAa\r\n");
+	if(CONF_GetProgressiveScan() > 0 && VIDEO_HaveComponentCable())
+	{
+		rmode = &TVNtsc480Prog;
+		gprintf("PROG\n");
 	}
-	#endif
-
-	bool progressive = (CONF_GetProgressiveScan() > 0) && VIDEO_HaveComponentCable();
-	switch( *(vu32*)0x800000CC )
+	else
 	{
-		default:
-		case 0:
+		switch(CONF_GetVideo())
 		{
-			if(progressive)
-				rmode = &TVNtsc480Prog;
-			else
-				rmode = &TVNtsc480IntDf;
-		} break;
-		case 1:
-		{
-			if(progressive)
-				rmode = &TVEurgb60Hz480Prog;
-			else
-				rmode = &TVPal528IntDf;
-		} break;
-		case 2:
-		{
-			rmode = &TVMpal480IntDf;
-		} break;
-		case 5:
-		{
-			if(progressive)
-				rmode = &TVEurgb60Hz480Prog;
-			else
-				rmode = &TVEurgb60Hz480IntDf;
-		} 
+			case CONF_VIDEO_PAL:
+				if (CONF_GetEuRGB60() > 0)
+				{
+					gprintf("PAL60\n");
+					rmode = &TVEurgb60Hz480Int;
+				}
+				else
+				{
+					gprintf("PAL50\n");
+					rmode = &TVPal576IntDfScale;
+				}
+				break;
+			case CONF_VIDEO_MPAL:
+				gprintf("MPAL\n");
+				rmode = &TVMpal480IntDf;
+				break;
+			case CONF_VIDEO_NTSC:
+			default:
+				gprintf("NTSC\n");
+				rmode = &TVNtsc480Int;
+				break;
+		}
 	}
 	VIDEO_Configure(rmode);
 
@@ -1438,7 +1396,7 @@ void  GRRLIB_PrintBMF (const f32 xpos, const f32 ypos,
 
 	va_list argp;
 	va_start(argp, text);
-	size = vsprintf(tmp, text, argp);
+	size = vsnprintf(tmp, sizeof(tmp), text, argp);
 	va_end(argp);
 
 	for (i=0; i<size; i++) {
@@ -1490,7 +1448,7 @@ void  GRRLIB_GeckoPrintf (const char *text, ...) {
 
 	va_list argp;
 	va_start(argp, text);
-	size = vsprintf(tmp, text, argp);
+	size = vsnprintf(tmp, sizeof(tmp), text, argp);
 	va_end(argp);
 
 	usb_sendbuffer_safe(1, tmp, size);

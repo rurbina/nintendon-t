@@ -11,12 +11,9 @@
 #include "asm/EXIGetID.h"
 #include "asm/__CARDReadStatus.h"
 #include "asm/__CARDClearStatus.h"
-#include "asm/__CARDEraseSector.h"
 #include "asm/ReadROM.h"
 
 #include "asm/ARQPostRequest.h"
-#include "asm/ARInit.h"
-#include "asm/ARGetBaseAddress.h"
 #include "asm/ARStartDMA.h"
 #include "asm/ARStartDMA_PM.h"
 #include "asm/ARStartDMA_TC.h"
@@ -35,16 +32,7 @@
 #include "asm/PADControlAllMotors.h"
 #include "asm/PADControlMotor.h"
 #include "asm/PADIsBarrel.h"
-#include "asm/DVDInquiryAsync.h"
-#include "asm/DVDSeekAbsAsyncPrio.h"
 #include "asm/GCAMSendCommand.h"
-#include "asm/PADReadGP.h"
-#include "asm/PADReadF.h"
-#include "asm/PADReadVS.h"
-#include "asm/CheckTestMenu.h"
-#include "asm/CheckTestMenuVS.h"
-#include "asm/RestoreSettingsAX.h"
-#include "asm/RestoreSettingsVS.h"
 #include "asm/patch_fwrite_Log.h"
 #include "asm/patch_fwrite_GC.h"
 #include "asm/FakeRSWLoad.h"
@@ -62,6 +50,10 @@
 #include "asm/GXLoadTlut.h"
 #include "asm/DatelTimer.h"
 #include "asm/SonicRidersCopy.h"
+
+#include "asm/MajoraAudioStream.h"
+#include "asm/MajoraLoadRegs.h"
+#include "asm/MajoraSaveRegs.h"
 
 unsigned char SRAM[64] =
 {
@@ -116,7 +108,7 @@ const u32 DVDGetDriveStatus[] = {
         0x38600000,     //  li		r3, 0
         0x4E800020      //  blr
 };
-
+#ifndef AUDIOSTREAM
 // Audio streaming replacement functions copied from Swiss r92
 const u32 DVDLowAudioStatusNULL[17] = {
         // execute function(1); passed in on r4
@@ -166,7 +158,7 @@ const u32 DVDLowReadAudioNULL[10] = {
         0x38210040,     //  addi        sp, sp, 64
         0x4E800020      //  blr
 };
-
+#endif
 //function header is good enough to verify
 const u32 PADIsBarrelOri[] = {
 		0x2C030000,		// cmpwi	r3,0

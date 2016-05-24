@@ -4,15 +4,15 @@ AS	=	$(PREFIX)as
 LD	=	$(PREFIX)gcc
 STRIP =	$(PREFIX)strip
 
-CFLAGS	=	-mbig-endian -O2 -g -I. -Wall -mcpu=arm926ej-s -msoft-float -mfloat-abi=soft -fdata-sections -ffunction-sections \
+CFLAGS	=	-mbig-endian -O3 -g -I. -Wall -mcpu=arm926ej-s -msoft-float -mfloat-abi=soft -fdata-sections -ffunction-sections \
 	-fno-builtin-toupper -fno-builtin-memcpy -fno-builtin-memset -fno-builtin-memcmp -fno-builtin-malloc -fno-builtin-free
 
 ASFLAGS	=	-mbig-endian -mcpu=arm926ej-s
 LDFLAGS	=	-nostartfiles -nodefaultlibs -mbig-endian -Wl,--gc-sections,-T,kernel.ld,-Map,kernel.map -n
 
 TARGET	=	kernel.elf
-OBJECTS	=	start.o common.o alloc.o GCAM.o JVSIO.o JVSIOMessage.o FST.o DI.o Patch.o PatchTimers.o PatchWidescreen.o ISO.o \
-			Stream.o adp.o EXI.o SI.o option/ccsbcs.o ff.o HID.o diskio.o Config.o utils_asm.o ES.o NAND.o main.o syscalls.o \
+OBJECTS	=	start.o common.o alloc.o GCAM.o JVSIO.o JVSIOMessage.o FST.o DI.o RealDI.o Patch.o PatchTimers.o TRI.o PatchWidescreen.o \
+			ISO.o Stream.o adp.o EXI.o SI.o option/ccsbcs.o ff.o HID.o diskio.o Config.o utils_asm.o ES.o NAND.o main.o syscalls.o \
 			ReadSpeed.o vsprintf.o string.o prs.o SDI.o usb.o usbstorage.o
 BINFILE = ../loader/data/kernel.bin
 

@@ -80,13 +80,22 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 	((typeof(x))(((u32)(x)) & (~(align-1))))
 
 extern bool UseSD;
-extern u32 Region;
 extern u32 POffset;
 extern NIN_CFG *ncfg;
 extern FILE *cfg;
 extern GRRLIB_ttfFont *myFont;
 extern GRRLIB_texImg *background;
 extern GRRLIB_texImg *screen_buffer;
+
+enum
+{
+	TRI_NONE = 0,
+	TRI_GP1,
+	TRI_GP2,
+	TRI_AX,
+	TRI_VS4,
+	TRI_SB,
+} TRIGames;
 
 enum ContentType
 {
@@ -137,8 +146,10 @@ const char* const GetRootDevice();
 void RAMInit(void);
 void Initialise();
 bool LoadNinCFG();
+void UpdateNinCFG();
 bool IsGCGame(u8 *Buffer);
-bool IsTRIGame(char *Path);
+u32 IsTRIGame(char *Path, u32 CurDICMD, u32 ISOShift);
+int CreateNewFile(char *Path, u32 size);
 void ExitToLoader(int ret);
 void ClearScreen();
 void CloseDevices();

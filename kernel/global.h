@@ -11,6 +11,7 @@
 //#define CARDDEBUG 1
 #define AUDIOSTREAM 1
 #define PATCHALL	1
+//#define PERFMON 1
 
 //#define DEBUG_ES	1
 #define DEBUG_HID	1
@@ -189,7 +190,9 @@ enum
 	TRI_GP1,
 	TRI_GP2,
 	TRI_AX,
+	TRI_VS3,
 	TRI_VS4,
+	TRI_YAK,
 	TRI_SB,
 } TRIGames;
 
